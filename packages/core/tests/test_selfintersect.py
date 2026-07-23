@@ -63,6 +63,23 @@ def test_deloop_removes_a_synthetic_self_intersection():
     assert not DL.has_self_intersection(fixed, dens=59)
 
 
+def test_intersection_diagnostics_identify_crossing_curves():
+    report = DL.intersection_diagnostics(BOW_TIE, dens=59)
+    assert report["valid_contract"]
+    assert report["has_self_intersection"]
+    assert report["subpath"] == 0
+    assert report["curve_a"] != report["curve_b"]
+    assert len(report["point"]) == 2
+
+
+def test_intersection_diagnostics_cover_clean_and_invalid_paths():
+    clean = DL.intersection_diagnostics(CLEAN_SQUARE)
+    invalid = DL.intersection_diagnostics("M0 0L1 1Z")
+    assert clean["has_self_intersection"] is False
+    assert invalid["valid_contract"] is False
+    assert invalid["has_self_intersection"] is None
+
+
 def test_clean_geometry_remains_byte_identical():
     fixed, report = DL.deloop(CLEAN_SQUARE)
     assert report == []

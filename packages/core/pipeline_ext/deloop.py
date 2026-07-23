@@ -159,6 +159,46 @@ def has_self_intersection(d, dens=60):
     return False
 
 
+def intersection_diagnostics(d, dens=60):
+    """Return JSON-safe details for the first detected crossing."""
+    subs = _parse_tokens(d)
+    if subs is None:
+        return {
+            "valid_contract": False,
+            "path_chars": len(d),
+            "subpaths": 0,
+            "cubics": 0,
+            "has_self_intersection": None,
+        }
+    total = sum(len(sub) for sub in subs)
+    base = {
+        "valid_contract": True,
+        "path_chars": len(d),
+        "subpaths": len(subs),
+        "cubics": total,
+        "density": dens,
+    }
+    for si, sub in enumerate(subs):
+        if len(sub) < 2:
+            continue
+        hit = _find_intersection(sub, dens)
+        if hit is None:
+            continue
+        (bi0, t0), (bi1, t1), point = hit
+        return {
+            **base,
+            "has_self_intersection": True,
+            "subpath": si,
+            "subpath_cubics": len(sub),
+            "curve_a": bi0,
+            "curve_b": bi1,
+            "t_a": round(float(t0), 6),
+            "t_b": round(float(t1), 6),
+            "point": [round(float(point[0]), 4), round(float(point[1]), 4)],
+        }
+    return {**base, "has_self_intersection": False}
+
+
 def deloop(d, dens=60):
     """De-loop every subpath of an absolute-M/C/Z `d` string. -> (new_d, report)."""
     out, report = [], []

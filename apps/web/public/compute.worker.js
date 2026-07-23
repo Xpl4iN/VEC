@@ -89,12 +89,24 @@ function processJob(job) {
     };
   }
   pyodide.globals.set("_vec_d", pathD);
+  const cleanupContext = {
+    name,
+    engine,
+    useG1,
+    scale: sVal,
+    paletteIndex: idx,
+    selectedColor: idx == null || !palette ? null : palette[idx],
+    cfg,
+  };
   const cleanup = JSON.parse(pyodide.runPython([
-    "if not deloop.parse_is_trustworthy(_vec_d):",
-    "    raise ValueError('cleanup refused path data outside absolute M/C/Z contract')",
+    `_vec_context = json.loads(${q(JSON.stringify(cleanupContext))})`,
+    "_vec_before = deloop.intersection_diagnostics(_vec_d)",
+    "if not _vec_before['valid_contract']:",
+    "    raise ValueError('cleanup refused path data outside absolute M/C/Z contract: ' + json.dumps({'layer': _vec_context, 'path': _vec_before}, separators=(',', ':')))",
     "_vec_fixed, _vec_cleanup = deloop.deloop(_vec_d)",
-    "if deloop.has_self_intersection(_vec_fixed):",
-    "    raise ValueError('self-intersection survived cleanup')",
+    "_vec_after = deloop.intersection_diagnostics(_vec_fixed)",
+    "if _vec_after['has_self_intersection']:",
+    "    raise ValueError('self-intersection survived cleanup: ' + json.dumps({'layer': _vec_context, 'before': _vec_before, 'after': _vec_after, 'cleanup': _vec_cleanup}, separators=(',', ':')))",
     "json.dumps({'d': _vec_fixed, 'removed': _vec_cleanup})",
   ].join("\n")));
   const d = cleanup.d;
