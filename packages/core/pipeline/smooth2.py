@@ -12,8 +12,8 @@ from scipy.interpolate import splprep, splev
 from scipy.spatial import cKDTree
 import pipeline as P
 
-CAP = 0.60      # max deviation from source contour, source px
-FIT_ERR = 0.08  # bezier fit tolerance against the smoothed spline, source px
+CAP = 0.90      # smooth raster-scale edge noise without moving structural corners
+FIT_ERR = 0.12  # avoid encoding subpixel stair steps as redundant curve nodes
 DENSE = 0.25    # dense sampling step of the spline for the bezier fit
 
 

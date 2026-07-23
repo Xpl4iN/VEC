@@ -22,14 +22,14 @@ Z = 4          # upsample factor of the coverage field before contouring
 STEP = 0.30    # arclength resample step, source px
 SCALE = 2.0    # output coordinate scale (default 2x source)
 MAXHI = 8192   # cap on upsampled contour-grid dimension (browser memory guard).
-CORNER_WIN = 2.0   # arclength window for turn-angle test, source px
-CORNER_DEG = 45.0  # turn angle above this = real corner, pinned + sharp
+CORNER_WIN = 5.0   # reject pixel-scale stair steps while retaining structural corners
+CORNER_DEG = 50.0  # turn angle above this = real corner, pinned + sharp
 CAP = 0.50     # max smoothing deviation, source px
 ITERS = 600    # Taubin iterations
 LAM, MU = 0.55, -0.58
 FIT_ERR = 0.25     # bezier fit tolerance, source px
 MIN_AREA = 2.0     # drop specks smaller than this, source px^2
-MIN_AREA_FRACTION = 0.00005  # adaptive floor for large uploaded artwork
+MIN_AREA_FRACTION = 0.0002  # discard palette freckles below 0.02% of the canvas
 COVERAGE_MODE = "nearest"  # parity with the UI color-reduction preview
 
 # Layer definitions are injected by the caller at runtime.

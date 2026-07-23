@@ -13,7 +13,10 @@ export function assembleLayers(layers: AssembledLayer[], viewBox: string, bgFill
   const h = parts[3] ?? "100";
   const bgRect = bgFill ? `    <rect width="${w}" height="${h}" fill="${escapeAttr(bgFill)}"/>\n` : "";
   const paths = layers
-    .map((l) => `    <path id="${escapeAttr(l.id)}" fill="${escapeAttr(l.fill)}" fill-rule="evenodd" d="${l.d}"/>`)
+    // A one-output-pixel centered underpaint closes antialiasing seams between
+    // independently fitted neighboring layers. Half of it sits outside the
+    // contour, which is 0.25 source px at the default 2x export scale.
+    .map((l) => `    <path id="${escapeAttr(l.id)}" fill="${escapeAttr(l.fill)}" stroke="${escapeAttr(l.fill)}" stroke-width="1" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke fill" fill-rule="evenodd" d="${l.d}"/>`)
     .join("\n");
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" width="${w}" height="${h}">`,

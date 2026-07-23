@@ -20,7 +20,7 @@ def test_adaptive_cleanup_removes_freckles_and_fills_pinholes():
 
     cleaned, min_area = P.clean_contour_field(field)
 
-    assert min_area == 50
+    assert min_area == 200
     assert cleaned[21, 21] == 0.0
     assert cleaned[401, 401] == 1.0
     assert cleaned[500, 500] == 1.0
@@ -28,11 +28,30 @@ def test_adaptive_cleanup_removes_freckles_and_fills_pinholes():
 
 def test_adaptive_cleanup_preserves_meaningful_small_regions():
     field = np.zeros((1000, 1000), dtype=float)
-    field[50:60, 50:60] = 1.0
+    field[50:70, 50:70] = 1.0
 
     cleaned, _ = P.clean_contour_field(field)
 
     assert cleaned[55, 55] == 1.0
+
+
+def test_corner_window_rejects_stair_steps_but_keeps_square_corners():
+    points = []
+    for a, b in [
+        ((0, 0), (20, 0)),
+        ((20, 0), (20, 20)),
+        ((20, 20), (0, 20)),
+        ((0, 20), (0, 0)),
+    ]:
+        count = int(np.hypot(b[0] - a[0], b[1] - a[1]) / P.STEP)
+        for t in np.linspace(0, 1, count, endpoint=False):
+            points.append((a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])))
+    assert len(P.corners(np.array(points))) == 4
+
+    t = np.linspace(0, 2 * np.pi, 1000, endpoint=False)
+    noisy_circle = np.column_stack([50 * np.cos(t), 50 * np.sin(t)])
+    noisy_circle[:, 0] += 0.25 * np.sign(np.sin(47 * t))
+    assert len(P.corners(noisy_circle)) == 0
 
 
 def test_nearest_palette_coverage_keeps_intermediate_shade_as_solid_layer():
