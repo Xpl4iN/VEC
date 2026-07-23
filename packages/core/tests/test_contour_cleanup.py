@@ -54,7 +54,7 @@ def test_corner_window_rejects_stair_steps_but_keeps_square_corners():
     assert len(P.corners(noisy_circle)) == 0
 
 
-def test_nearest_palette_coverage_keeps_intermediate_shade_as_solid_layer():
+def test_cumulative_palette_coverage_keeps_intermediate_shade_and_underpaints_higher_layers():
     pixels = np.array([[
         [65, 220, 0, 255],
         [70, 170, 15, 255],
@@ -72,4 +72,4 @@ def test_nearest_palette_coverage_keeps_intermediate_shade_as_solid_layer():
             del P.LAYERS["middle"]
 
     assert offset == [0, 0]
-    assert field.tolist() == [[0.0, 1.0, 0.0]]
+    assert field.tolist() == [[0.0, 1.0, 1.0]]
