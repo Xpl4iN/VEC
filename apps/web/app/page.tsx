@@ -812,31 +812,15 @@ export default function Page() {
     };
   }, [isSliding, handleMove]);
 
-  // Canonical SVG stage renderer (100% parity with exported file)
-  const renderProgressiveSvg = () => {
-    if (!activeJobs.length) return null;
-    const isComplete = results.length === activeJobs.length && activeJobs.length > 0;
-    if (isComplete && rawSvgContent) {
-      return (
-        <div
-          className="w-full h-full flex items-center justify-center [&>svg]:max-w-full [&>svg]:max-h-full [&>svg]:w-auto [&>svg]:h-auto [&>svg]:object-contain drop-shadow-2xl transition-all duration-700"
-          dangerouslySetInnerHTML={{ __html: rawSvgContent }}
-        />
-      );
-    }
-    const vbParts = activeViewBox.split(" ");
-    const vbW = vbParts[2] ?? "100";
-    const vbH = vbParts[3] ?? "100";
-    return (
-      <svg viewBox={activeViewBox} xmlns="http://www.w3.org/2000/svg" className="w-full h-full object-contain drop-shadow-2xl transition-all duration-700">
-        {includeBg && <rect width={vbW} height={vbH} fill={bgHex} />}
-        {activeJobs.map(job => {
-          const res = results.find(r => r.name === job.name);
-          return res && res.d ? <path key={job.name} fill={job.fill} fillRule="evenodd" d={res.d} style={{ transition: 'opacity 0.5s ease-in', opacity: 1 }} /> : null;
-        })}
-      </svg>
-    );
-  };
+  // The preview and download share this exact Blob URL. There is no separate
+  // JSX reconstruction that could differ in strokes, ordering, or geometry.
+  const renderExportSvg = () => svgUrl ? (
+    <img
+      src={svgUrl}
+      className="max-w-full max-h-full object-contain drop-shadow-2xl transition-all duration-700"
+      alt="Exact exported SVG preview"
+    />
+  ) : null;
 
   return (
     <div className="flex h-screen w-full overflow-hidden text-[var(--text)] select-none bg-[var(--bg)] font-sans">
@@ -1553,7 +1537,7 @@ export default function Page() {
             </div>
 
             {/* Rendered SVG Vector Output (After) with Clip Path for Slider */}
-            {activeJobs.length > 0 && (
+            {svgUrl && (
               <div
                 className={`absolute inset-12 flex items-center justify-center overflow-hidden ${isAnimatingReveal ? 'transition-all duration-700 ease-in-out' : 'transition-none'}`}
                 style={{ clipPath: `inset(0 0 0 ${sliderPos}%)` }}
@@ -1567,7 +1551,7 @@ export default function Page() {
                       "bg-black"
                   }`} />
                 <div className="relative z-10 w-full h-full flex items-center justify-center">
-                  {renderProgressiveSvg()}
+                  {renderExportSvg()}
                 </div>
               </div>
             )}
