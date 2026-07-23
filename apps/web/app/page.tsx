@@ -668,7 +668,7 @@ export default function Page() {
           requestedColorCount: kColorsCount,
           colorMergeThreshold,
           colorPreviewEnabled: showQuantizedPreview,
-          coverageMode: "cumulative-nearest",
+          coverageMode: "nearest-isolated",
         },
         palette: picks.map((pick, index) => ({
           index,

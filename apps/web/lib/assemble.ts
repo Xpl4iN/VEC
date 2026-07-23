@@ -13,9 +13,9 @@ export function assembleLayers(layers: AssembledLayer[], viewBox: string, bgFill
   const h = parts[3] ?? "100";
   const bgRect = bgFill ? `    <rect width="${w}" height="${h}" fill="${escapeAttr(bgFill)}"/>\n` : "";
   const paths = layers
-    // Cumulative masks provide the structural underpaint. A progressively
-    // wider, sharp stroke lets later layers fully cover earlier edge
-    // antialiasing without rounding or extending hard shade endpoints.
+    // Each path remains an isolated, editable color region. A progressively
+    // wider, sharp stroke closes subpixel seams only in the composited render
+    // without duplicating other colors inside the named layer.
     .map((l, i) => {
       const progress = layers.length > 1 ? i / (layers.length - 1) : 1;
       const strokeWidth = (0.5 + 1.5 * progress).toFixed(2).replace(/\.?0+$/, "");

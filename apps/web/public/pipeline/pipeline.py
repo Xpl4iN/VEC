@@ -30,7 +30,7 @@ LAM, MU = 0.55, -0.58
 FIT_ERR = 0.25     # bezier fit tolerance, source px
 MIN_AREA = 2.0     # drop specks smaller than this, source px^2
 MIN_AREA_FRACTION = 0.0002  # discard palette freckles below 0.02% of the canvas
-COVERAGE_MODE = "cumulative-nearest"  # seam-safe stack matching the UI palette
+COVERAGE_MODE = "nearest-isolated"  # one editable SVG layer per palette color
 
 # Layer definitions are injected by the caller at runtime.
 # name: (file, offset, palette, index-of-color-to-extract or None for alpha)
@@ -46,7 +46,7 @@ def coverage(name):
         return alpha, off
     C = a[..., :3]
     P = np.array(palette, float)                       # k x 3
-    if COVERAGE_MODE == "cumulative-nearest":
+    if COVERAGE_MODE == "nearest-isolated":
         best = np.zeros(alpha.shape, dtype=np.int16)
         best_dist = np.full(alpha.shape, np.inf, dtype=np.float64)
         for pi, color in enumerate(P):
@@ -54,10 +54,7 @@ def coverage(name):
             take = dist < best_dist
             best[take] = pi
             best_dist[take] = dist[take]
-        # Build nested paint masks rather than unrelated color cutouts. When
-        # layers are painted in palette order, later layers cover earlier ones
-        # and every shared boundary has opaque artwork beneath it.
-        return alpha * (best >= idx), off
+        return alpha * (best == idx), off
     # barycentric weights: minimise |P^T w - C| s.t. sum w = 1  (soft constraint)
     W = 1000.0
     M = np.vstack([P.T, np.full((1, len(P)), W)])      # 4 x k
