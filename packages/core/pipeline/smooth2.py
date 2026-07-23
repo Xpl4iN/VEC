@@ -17,6 +17,35 @@ FIT_ERR = 0.22  # prefer compact, editor-friendly curves over subpixel tracing
 DENSE = 0.25    # dense sampling step of the spline for the bezier fit
 
 
+def drop_tiny_curves(curves, min_len=2.0):
+    """Remove subpixel fitting fragments while preserving the closed contour.
+
+    Raster chatter can make the cubic fitter emit a very short curve between
+    two otherwise smooth curves. In an editor that fragment appears as a
+    needle-like seam or an unnecessary node. Join its neighbours at the
+    fragment midpoint and translate their adjacent handles by the same amount,
+    which keeps the surrounding tangent shapes intact.
+    """
+    cs = [np.asarray(curve, dtype=float).copy() for curve in curves]
+    changed = True
+    while changed and len(cs) > 3:
+        changed = False
+        for i, curve in enumerate(cs):
+            if float(np.linalg.norm(curve[3] - curve[0])) >= min_len:
+                continue
+            midpoint = 0.5 * (curve[0] + curve[3])
+            previous = cs[(i - 1) % len(cs)]
+            following = cs[(i + 1) % len(cs)]
+            previous[2] += midpoint - previous[3]
+            previous[3] = midpoint
+            following[1] += midpoint - following[0]
+            following[0] = midpoint
+            cs.pop(i)
+            changed = True
+            break
+    return cs
+
+
 def _spline(pts, s, closed):
     x, y = pts[:, 0], pts[:, 1]
     if closed:
@@ -95,6 +124,7 @@ def process(name):
                                       P.unit(q[-2] - q[-1]), err=FIT_ERR)
         if len(curves) == 0:
             continue
+        curves = drop_tiny_curves(curves)
         # fidelity of the final beziers
         samp = np.vstack([P._bez(c, np.linspace(0, 1, 40)) for c in curves])
         d, _ = tree.query(samp)
