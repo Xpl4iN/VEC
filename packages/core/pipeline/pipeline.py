@@ -14,14 +14,16 @@ Pipeline per layer:
 import sys, json, math
 import numpy as np
 from PIL import Image
-from scipy.ndimage import label, zoom
+from scipy.ndimage import binary_dilation, label, zoom
 from scipy.spatial import cKDTree
 from skimage.measure import find_contours
 
 Z = 4          # upsample factor of the coverage field before contouring
 STEP = 0.30    # arclength resample step, source px
-CORNER_WIN = 5.0   # reject pixel-scale stair steps while retaining structural corners
-CORNER_DEG = 50.0  # turn angle above this = real corner, pinned + sharp
+SCALE = 2.0    # output coordinate scale (default 2x source)
+MAXHI = 8192   # cap on upsampled contour-grid dimension (browser memory guard).
+CORNER_WIN = 8.0   # reject raster chatter while retaining structural corners
+CORNER_DEG = 55.0  # turn angle above this = real corner, pinned + sharp
 CAP = 0.50     # max smoothing deviation, source px
 ITERS = 600    # Taubin iterations
 LAM, MU = 0.55, -0.58
@@ -29,10 +31,53 @@ FIT_ERR = 0.25     # bezier fit tolerance, source px
 MIN_AREA = 2.0     # drop specks smaller than this, source px^2
 MIN_AREA_FRACTION = 0.0002  # discard palette freckles below 0.02% of the canvas
 COVERAGE_MODE = "nearest-isolated"  # one editable SVG layer per palette color
+INTERIOR_SHADE_MERGE_DISTANCE = 45.0
+INTERIOR_NEIGHBOR_RATIO = 0.75
+INTERIOR_SHADE_MIN_FRACTION = 0.005
 
 # Layer definitions are injected by the caller at runtime.
 # name: (file, offset, palette, index-of-color-to-extract or None for alpha)
 LAYERS = {}
+
+
+def clean_palette_assignments(best, alpha, palette):
+    """Absorb enclosed near-color islands into their surrounding color.
+
+    A near shade on an exterior silhouette may be an intentional arm or shadow
+    and is preserved. An enclosed patch surrounded by one similar color is
+    usually quantization or antialias residue and should not become an object.
+    """
+    cleaned = best.copy()
+    structure = np.ones((3, 3), dtype=bool)
+    colors = np.asarray(palette, dtype=float)
+    global_counts = np.bincount(best[alpha >= 0.5].ravel(), minlength=len(colors))
+    min_pixels = max(int(MIN_AREA), int(round(alpha.size * INTERIOR_SHADE_MIN_FRACTION)))
+    for idx in range(len(colors)):
+        components, count = label(cleaned == idx)
+        sizes = np.bincount(components.ravel())
+        for component_id in range(1, count + 1):
+            if sizes[component_id] < min_pixels:
+                continue
+            component = components == component_id
+            if (component[0].any() or component[-1].any() or component[:, 0].any() or component[:, -1].any()):
+                continue
+            ring = binary_dilation(component, structure=structure) & ~component
+            if np.mean(alpha[ring] < 0.5) >= 0.5:
+                continue
+            neighbors = cleaned[ring & (alpha >= 0.5)]
+            neighbors = neighbors[neighbors != idx]
+            if neighbors.size == 0:
+                continue
+            counts = np.bincount(neighbors, minlength=len(colors))
+            target = int(np.argmax(counts))
+            if counts[target] / neighbors.size < INTERIOR_NEIGHBOR_RATIO:
+                continue
+            if global_counts[target] <= global_counts[idx]:
+                continue
+            if np.linalg.norm(colors[idx] - colors[target]) > INTERIOR_SHADE_MERGE_DISTANCE:
+                continue
+            cleaned[component] = target
+    return cleaned
 
 
 # ---------------------------------------------------------------- coverage
@@ -52,6 +97,7 @@ def coverage(name):
             take = dist < best_dist
             best[take] = pi
             best_dist[take] = dist[take]
+        best = clean_palette_assignments(best, alpha, P)
         return alpha * (best == idx), off
     # barycentric weights: minimise |P^T w - C| s.t. sum w = 1  (soft constraint)
     W = 1000.0
@@ -96,11 +142,14 @@ def contours_of(field):
     pad = 3
     field, min_area = clean_contour_field(field)
     f = np.pad(field, pad, mode="constant")
-    hi = zoom(f, Z, order=3, mode="constant", cval=0.0)
+    # Upsample by Z, but cap the grid so large uploads do not exhaust browser
+    # memory. The effective factor never exceeds Z.
+    z_eff = min(float(Z), max(1.0, MAXHI / max(f.shape)))
+    hi = zoom(f, z_eff, order=3, mode="constant", cval=0.0)
     hi = np.clip(hi, 0, 1)
     out = []
     for c in find_contours(hi, 0.5):
-        pts = np.column_stack([c[:, 1] / Z - pad, c[:, 0] / Z - pad])  # x, y
+        pts = np.column_stack([c[:, 1] / z_eff - pad, c[:, 0] / z_eff - pad])  # x, y
         if len(pts) < 8:
             continue
         x, y = pts[:, 0], pts[:, 1]
@@ -251,7 +300,9 @@ def contour_to_beziers(p, pin):
     return out
 
 
-def beziers_to_d(curves, off, scale=2.0):
+def beziers_to_d(curves, off, scale=None):
+    if scale is None:
+        scale = SCALE
     ox, oy = off
     def P(pt):
         return f"{round((ox + pt[0]) * scale, 3):g} {round((oy + pt[1]) * scale, 3):g}"

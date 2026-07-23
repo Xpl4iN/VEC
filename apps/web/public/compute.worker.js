@@ -51,7 +51,7 @@ function processJob(job) {
     `pipeline.SCALE = ${sVal}\n` +
     `pipeline.Z = min(8, max(2, int(round(4 * math.sqrt(${sVal} / 2.0)))))\n` +
     `pipeline.STEP = max(0.15, round(0.30 / math.sqrt(${sVal} / 2.0), 3))\n` +
-    `smooth2.FIT_ERR = max(0.02, round(0.08 / math.sqrt(${sVal} / 2.0), 3))\n` +
+    `smooth2.FIT_ERR = max(0.14, round(0.22 / math.sqrt(${sVal} / 2.0), 3))\n` +
     `smooth3.FIT_ERR = max(0.02, round(0.05 / math.sqrt(${sVal} / 2.0), 3))\n` +
     `pipeline.LAYERS[${q(name)}] = (${q(file)}, (${offset[0]}, ${offset[1]}), ${pyPalette(palette)}, ${idx == null ? "None" : idx})\n`;
   if (engine === "smooth3") inject += `smooth3.CFG[${q(name)}] = ${pyCfg(cfg)}\n`;

@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState, useEffect } from "react";
 import { assembleLayers, type AssembledLayer } from "@/lib/assemble";
+import { consolidateSimilarColors } from "@/lib/palette";
 import { parseSvgInput, compositeRasters, scalePathData, type VectorPath } from "@/lib/svgInput";
 import { ComputePool, choosePoolSize } from "@/lib/pool";
 import type { LayerJob, LayerResult, Profile } from "@/lib/types";
@@ -225,7 +226,7 @@ export default function Page() {
         const dr = s.rgb[0] - avgR;
         const dg = s.rgb[1] - avgG;
         const db = s.rgb[2] - avgB;
-        return Math.sqrt(dr * dr + dg * dg + db * db) < 45;
+        return Math.sqrt(dr * dr + dg * dg + db * db) <= colorMergeThreshold;
       });
 
       if (!isSimilar) {
@@ -251,7 +252,7 @@ export default function Page() {
       name: `color-${i + 1}`,
       profile: "organic"
     }));
-  }, []);
+  }, [colorMergeThreshold]);
 
   const extractQuantizedPalette = useCallback((targetK: number) => {
     if (!sampleCanvas.current || !img) return;
@@ -290,6 +291,7 @@ export default function Page() {
       centroids.push(nextC);
     }
 
+    let clusterSizes = new Array(centroids.length).fill(0);
     for (let iter = 0; iter < 6; iter++) {
       const clusters: [number, number, number][][] = Array.from({ length: centroids.length }, () => []);
       for (const p of pixels) {
@@ -309,18 +311,19 @@ export default function Page() {
           centroids[cIdx] = [Math.round(sr / len), Math.round(sg / len), Math.round(sb / len)];
         }
       }
+      clusterSizes = clusters.map((cluster) => cluster.length);
     }
 
-    centroids.sort((a, b) => {
-      const lumA = 0.299 * a[0] + 0.587 * a[1] + 0.114 * a[2];
-      const lumB = 0.299 * b[0] + 0.587 * b[1] + 0.114 * b[2];
-      return lumB - lumA;
-    });
+    const weightedColors = centroids.map((rgb, index) => ({
+      rgb,
+      count: clusterSizes[index] ?? 0,
+    }));
+    const consolidated = consolidateSimilarColors(weightedColors, colorMergeThreshold);
 
     // Mark the border/background colour as BG (kept in palette for unmixing, not
     // computed as a slow full-canvas layer).
     const bg = detectBgRgb(imgData, w, h);
-    const newPicks: Pick[] = centroids.map((c, i) => ({
+    const newPicks: Pick[] = consolidated.map(({ rgb: c }, i) => ({
       rgb: c,
       hex: toHex(c[0], c[1], c[2]),
       role: nearBg(c, bg) ? "bg" : "layer",
@@ -329,8 +332,11 @@ export default function Page() {
     }));
 
     setPicks(newPicks);
-    showToast(`Quantized artwork into ${newPicks.length} layer colors`);
-  }, [img]);
+    const removed = centroids.length - consolidated.length;
+    showToast(removed > 0
+      ? `Quantized artwork into ${newPicks.length} clean colors (${removed} transition shade${removed === 1 ? "" : "s"} consolidated)`
+      : `Quantized artwork into ${newPicks.length} layer colors`);
+  }, [img, colorMergeThreshold]);
 
   const autoExtractPalette = useCallback(() => {
     extractQuantizedPalette(kColorsCount);
@@ -346,7 +352,6 @@ export default function Page() {
       if (mergedFlags[i]) continue;
       const primary = { ...picks[i] };
       const [r1, g1, b1] = primary.rgb;
-      let totalR = r1, totalG = g1, totalB = b1, count = 1;
 
       for (let j = i + 1; j < picks.length; j++) {
         if (mergedFlags[j]) continue;
@@ -355,15 +360,8 @@ export default function Page() {
         const distSq = (r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2;
         if (distSq <= threshSq) {
           mergedFlags[j] = true;
-          totalR += r2; totalG += g2; totalB += b2;
-          count++;
         }
       }
-      const avgR = Math.round(totalR / count);
-      const avgG = Math.round(totalG / count);
-      const avgB = Math.round(totalB / count);
-      primary.rgb = [avgR, avgG, avgB];
-      primary.hex = toHex(avgR, avgG, avgB);
       merged.push(primary);
     }
 
@@ -625,11 +623,10 @@ export default function Page() {
       setSecs(wall); setResults(res);
 
       const ordered: AssembledLayer[] = jobs
-        .map((j) => {
+        .flatMap((j) => {
           const r = res.find((x) => x.name === j.name);
-          return r ? { id: j.id, fill: j.fill, d: r.d ?? "" } : null;
-        })
-        .filter((x): x is AssembledLayer => x !== null);
+          return r ? [{ id: j.id, fill: j.fill, d: r.d ?? "", editableComponents: true }] : [];
+        });
       const passthrough: AssembledLayer[] = svgVectors.map((v, i) => ({
         id: `lettering-${i}`, fill: v.fill,
         d: scalePathData(v.d, scale, -svgOrigin[0], -svgOrigin[1]),
@@ -714,11 +711,10 @@ export default function Page() {
   useEffect(() => {
     if (activeJobs.length > 0 && results.length === activeJobs.length) {
       const ordered: AssembledLayer[] = activeJobs
-        .map((j) => {
+        .flatMap((j) => {
           const r = results.find((x) => x.name === j.name);
-          return r ? { id: j.id, fill: j.fill, d: r.d ?? "" } : null;
-        })
-        .filter((x): x is AssembledLayer => x !== null);
+          return r ? [{ id: j.id, fill: j.fill, d: r.d ?? "", editableComponents: true }] : [];
+        });
       const passthrough: AssembledLayer[] = svgVectors.map((v, i) => ({
         id: `lettering-${i}`, fill: v.fill,
         d: scalePathData(v.d, scale, -svgOrigin[0], -svgOrigin[1]),

@@ -73,3 +73,41 @@ def test_isolated_palette_coverage_keeps_only_the_selected_shade():
 
     assert offset == [0, 0]
     assert field.tolist() == [[0.0, 1.0, 0.0]]
+
+
+def test_enclosed_near_color_island_merges_but_contrasting_accent_survives():
+    bright = [78, 216, 16]
+    near = [83, 181, 18]
+    accent = [75, 152, 22]
+    pixels = np.zeros((9, 9, 4), dtype=np.uint8)
+    pixels[..., :3] = bright
+    pixels[..., 3] = 255
+    pixels[2:7, 2:7, :3] = near
+    pixels[4, 4, :3] = accent
+
+    best = np.zeros((9, 9), dtype=np.int16)
+    best[2:7, 2:7] = 1
+    best[4, 4] = 2
+    cleaned = P.clean_palette_assignments(
+        best,
+        np.ones((9, 9), dtype=float),
+        [bright, near, accent],
+    )
+
+    assert np.all(cleaned[2:4, 2:7] == 0)
+    assert cleaned[4, 4] == 2
+
+
+def test_compact_near_color_accent_is_not_absorbed():
+    bright = [78, 216, 16]
+    near = [83, 181, 18]
+    best = np.zeros((100, 100), dtype=np.int16)
+    best[48:53, 48:53] = 1
+
+    cleaned = P.clean_palette_assignments(
+        best,
+        np.ones((100, 100), dtype=float),
+        [bright, near],
+    )
+
+    assert np.all(cleaned[48:53, 48:53] == 1)

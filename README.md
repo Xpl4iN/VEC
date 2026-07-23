@@ -7,8 +7,10 @@ editable SVG. Processing runs locally in the browser through Pyodide.
 
 - PNG, WebP, and SVG input
 - Automatic color reduction with manual palette controls
+- Dominant-color consolidation that removes transition shades without shifting source colors
 - Organic and geometric vectorization profiles
-- Layered SVG assembly and export
+- Stroke-free SVG export with disconnected accents split into editor-selectable objects
+- Hole-aware component grouping so counters remain transparent
 - Pure-vector SVG passthrough without starting the compute runtime
 - Self-intersection detection and cleanup for generated cubic paths
 - Browser-based parallel processing with no upload service

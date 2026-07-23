@@ -5,7 +5,142 @@
 // safe ONLY for M/L/H/V/C/Q/T/Z — arc (A) commands would be corrupted. Flagged in
 // the UI; the real parser (Gate D) replaces it. See SPEC gotcha 2.
 
-export type AssembledLayer = { id: string; fill: string; d: string };
+export type AssembledLayer = {
+  id: string;
+  fill: string;
+  d: string;
+  editableComponents?: boolean;
+};
+
+type Point = [number, number];
+
+type ParsedSubpath = {
+  d: string;
+  points: Point[];
+  area: number;
+  bounds: [number, number, number, number];
+  parent: number | null;
+  depth: number;
+};
+
+const pathNumber = /^-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
+
+function flattenGeneratedSubpath(d: string): Point[] | null {
+  const tokens = d.match(/[MCZ]|-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi);
+  if (!tokens || tokens[0] !== "M") return null;
+  let i = 1;
+  const read = () => {
+    const token = tokens[i++];
+    return token != null && pathNumber.test(token) ? Number(token) : Number.NaN;
+  };
+  const start: Point = [read(), read()];
+  if (!Number.isFinite(start[0]) || !Number.isFinite(start[1])) return null;
+  const points: Point[] = [start];
+  let current = start;
+  while (i < tokens.length) {
+    const command = tokens[i++];
+    if (command === "Z") break;
+    if (command !== "C") return null;
+    const c1: Point = [read(), read()];
+    const c2: Point = [read(), read()];
+    const end: Point = [read(), read()];
+    if (![...c1, ...c2, ...end].every(Number.isFinite)) return null;
+    for (let step = 1; step <= 8; step++) {
+      const t = step / 8;
+      const mt = 1 - t;
+      points.push([
+        mt ** 3 * current[0] + 3 * mt ** 2 * t * c1[0] + 3 * mt * t ** 2 * c2[0] + t ** 3 * end[0],
+        mt ** 3 * current[1] + 3 * mt ** 2 * t * c1[1] + 3 * mt * t ** 2 * c2[1] + t ** 3 * end[1],
+      ]);
+    }
+    current = end;
+  }
+  return points.length >= 4 ? points : null;
+}
+
+function polygonArea(points: Point[]): number {
+  let sum = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    sum += a[0] * b[1] - b[0] * a[1];
+  }
+  return Math.abs(sum) / 2;
+}
+
+function pointInPolygon(point: Point, polygon: Point[]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i];
+    const [xj, yj] = polygon[j];
+    const crosses = (yi > point[1]) !== (yj > point[1]);
+    if (crosses && point[0] < ((xj - xi) * (point[1] - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// The generated-path contract is absolute M/C/Z. Split disconnected islands
+// into editor-selectable objects, but keep each hole in the same path as its
+// containing outer contour so counters in letters remain transparent.
+export function splitEditableComponents(d: string): string[] {
+  const chunks = d.match(/M[^M]*Z/gi);
+  if (!chunks || chunks.length < 2) return d.trim() ? [d] : [];
+  if (chunks.join("").replace(/\s+/g, "") !== d.replace(/\s+/g, "")) return [d];
+
+  const parsed: ParsedSubpath[] = [];
+  for (const chunk of chunks) {
+    const points = flattenGeneratedSubpath(chunk);
+    if (!points) return [d];
+    const xs = points.map((p) => p[0]);
+    const ys = points.map((p) => p[1]);
+    parsed.push({
+      d: chunk,
+      points,
+      area: polygonArea(points),
+      bounds: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
+      parent: null,
+      depth: 0,
+    });
+  }
+
+  for (let i = 0; i < parsed.length; i++) {
+    const probe = parsed[i].points[0];
+    let parent: number | null = null;
+    for (let j = 0; j < parsed.length; j++) {
+      if (i === j || parsed[j].area <= parsed[i].area) continue;
+      const [x0, y0, x1, y1] = parsed[j].bounds;
+      if (probe[0] <= x0 || probe[0] >= x1 || probe[1] <= y0 || probe[1] >= y1) continue;
+      if (!pointInPolygon(probe, parsed[j].points)) continue;
+      if (parent == null || parsed[j].area < parsed[parent].area) parent = j;
+    }
+    parsed[i].parent = parent;
+  }
+
+  const depthOf = (index: number): number => {
+    let depth = 0;
+    let parent = parsed[index].parent;
+    const seen = new Set<number>();
+    while (parent != null && !seen.has(parent)) {
+      seen.add(parent);
+      depth++;
+      parent = parsed[parent].parent;
+    }
+    return depth;
+  };
+  parsed.forEach((subpath, index) => {
+    subpath.depth = depthOf(index);
+  });
+
+  const components: string[] = [];
+  parsed.forEach((subpath, index) => {
+    if (subpath.depth % 2 !== 0) return;
+    const holes = parsed
+      .filter((candidate) => candidate.parent === index && candidate.depth === subpath.depth + 1)
+      .map((candidate) => candidate.d);
+    components.push([subpath.d, ...holes].join(""));
+  });
+  return components.length ? components : [d];
+}
 
 export function assembleLayers(layers: AssembledLayer[], viewBox: string, bgFill?: string | null): string {
   const parts = viewBox.trim().split(/\s+/);
@@ -13,13 +148,12 @@ export function assembleLayers(layers: AssembledLayer[], viewBox: string, bgFill
   const h = parts[3] ?? "100";
   const bgRect = bgFill ? `    <rect width="${w}" height="${h}" fill="${escapeAttr(bgFill)}"/>\n` : "";
   const paths = layers
-    // Each path remains an isolated, editable color region. A progressively
-    // wider, sharp stroke closes subpixel seams only in the composited render
-    // without duplicating other colors inside the named layer.
-    .map((l, i) => {
-      const progress = layers.length > 1 ? i / (layers.length - 1) : 1;
-      const strokeWidth = (0.5 + 1.5 * progress).toFixed(2).replace(/\.?0+$/, "");
-      return `    <path id="${escapeAttr(l.id)}" fill="${escapeAttr(l.fill)}" stroke="${escapeAttr(l.fill)}" stroke-width="${strokeWidth}" stroke-linejoin="miter" stroke-linecap="butt" stroke-miterlimit="2" paint-order="stroke fill" fill-rule="evenodd" d="${l.d}"/>`;
+    .flatMap((layer) => {
+      const components = layer.editableComponents ? splitEditableComponents(layer.d) : [layer.d];
+      return components.map((d, index) => {
+        const id = components.length === 1 ? layer.id : `${layer.id}-${index + 1}`;
+        return `    <path id="${escapeAttr(id)}" fill="${escapeAttr(layer.fill)}" fill-rule="evenodd" d="${d}"/>`;
+      });
     })
     .join("\n");
   return [
