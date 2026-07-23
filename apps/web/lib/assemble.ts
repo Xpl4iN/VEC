@@ -11,6 +11,7 @@ export type AssembledLayer = {
   d: string;
   editableComponents?: boolean;
 };
+export type ComponentStacking = "palette" | "large-first";
 
 type Point = [number, number];
 
@@ -142,19 +143,38 @@ export function splitEditableComponents(d: string): string[] {
   return components.length ? components : [d];
 }
 
-export function assembleLayers(layers: AssembledLayer[], viewBox: string, bgFill?: string | null): string {
+function componentArea(d: string): number {
+  const outer = d.match(/M[^M]*Z/i)?.[0];
+  if (!outer) return 0;
+  const points = flattenGeneratedSubpath(outer);
+  return points ? polygonArea(points) : 0;
+}
+
+export function assembleLayers(
+  layers: AssembledLayer[],
+  viewBox: string,
+  bgFill?: string | null,
+  stacking: ComponentStacking = "palette",
+): string {
   const parts = viewBox.trim().split(/\s+/);
   const w = parts[2] ?? "100";
   const h = parts[3] ?? "100";
   const bgRect = bgFill ? `    <rect width="${w}" height="${h}" fill="${escapeAttr(bgFill)}"/>\n` : "";
-  const paths = layers
-    .flatMap((layer) => {
+  const components = layers
+    .flatMap((layer, layerIndex) => {
       const components = layer.editableComponents ? splitEditableComponents(layer.d) : [layer.d];
       return components.map((d, index) => {
         const id = components.length === 1 ? layer.id : `${layer.id}-${index + 1}`;
-        return `    <path id="${escapeAttr(id)}" fill="${escapeAttr(layer.fill)}" fill-rule="evenodd" d="${d}"/>`;
+        return { id, fill: layer.fill, d, area: componentArea(d), layerIndex, componentIndex: index };
       });
-    })
+    });
+  if (stacking === "large-first") {
+    components.sort((a, b) =>
+      b.area - a.area || a.layerIndex - b.layerIndex || a.componentIndex - b.componentIndex);
+  }
+  const paths = components
+    .map(({ id, fill, d }) =>
+      `    <path id="${escapeAttr(id)}" fill="${escapeAttr(fill)}" fill-rule="evenodd" d="${d}"/>`)
     .join("\n");
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" width="${w}" height="${h}">`,

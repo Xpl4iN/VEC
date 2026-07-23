@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState, useEffect } from "react";
-import { assembleLayers, type AssembledLayer } from "@/lib/assemble";
+import { assembleLayers, type AssembledLayer, type ComponentStacking } from "@/lib/assemble";
 import { consolidateSimilarColors } from "@/lib/palette";
 import { parseSvgInput, compositeRasters, scalePathData, type VectorPath } from "@/lib/svgInput";
 import { ComputePool, choosePoolSize } from "@/lib/pool";
@@ -36,6 +36,74 @@ type Pick = { rgb: [number, number, number]; hex: string; role: "layer" | "bg"; 
 type Mode = "idle" | "custom";
 type StageBg = "dark" | "light" | "black" | "checker";
 type SourceSnapshot = { name: string; type: string; size: number; dataUrl: string };
+type QualityPreset = "balanced" | "illustrated" | "faithful" | "geometric";
+
+const QUALITY_PRESETS: Record<QualityPreset, {
+  label: string;
+  description: string;
+  profile: Profile;
+  smoothingCap: number;
+  fitError: number;
+  cornerWindow: number;
+  cornerAngle: number;
+  tinyCurve: number;
+  minAreaFraction: number;
+  stacking: ComponentStacking;
+  outputScale: number;
+}> = {
+  balanced: {
+    label: "Balanced",
+    description: "General logos with clean curves and moderate node economy.",
+    profile: "organic",
+    smoothingCap: 1.35,
+    fitError: 0.22,
+    cornerWindow: 8,
+    cornerAngle: 55,
+    tinyCurve: 2,
+    minAreaFraction: 0.0002,
+    stacking: "palette",
+    outputScale: 2,
+  },
+  illustrated: {
+    label: "Illustrated",
+    description: "Badges, mascots, lettering, food art, and mixed small details.",
+    profile: "detailed",
+    smoothingCap: 0.75,
+    fitError: 0.12,
+    cornerWindow: 5,
+    cornerAngle: 40,
+    tinyCurve: 1,
+    minAreaFraction: 0.00005,
+    stacking: "large-first",
+    outputScale: 2,
+  },
+  faithful: {
+    label: "Maximum Detail",
+    description: "Preserve tiny features and typography with more editable nodes.",
+    profile: "detailed",
+    smoothingCap: 0.45,
+    fitError: 0.08,
+    cornerWindow: 4,
+    cornerAngle: 32,
+    tinyCurve: 0.5,
+    minAreaFraction: 0.00001,
+    stacking: "large-first",
+    outputScale: 3,
+  },
+  geometric: {
+    label: "Geometric",
+    description: "Hard-edged marks, icons, and intentionally polygonal artwork.",
+    profile: "geometric",
+    smoothingCap: 0.5,
+    fitError: 0.08,
+    cornerWindow: 4,
+    cornerAngle: 35,
+    tinyCurve: 0.8,
+    minAreaFraction: 0.00005,
+    stacking: "large-first",
+    outputScale: 2,
+  },
+};
 
 interface Step {
   id: string;
@@ -78,6 +146,15 @@ export default function Page() {
   const [sessionExportUrl, setSessionExportUrl] = useState<string | null>(null);
   const [sourceSnapshot, setSourceSnapshot] = useState<SourceSnapshot | null>(null);
   const [scale, setScale] = useState<number>(2);
+  const [qualityPreset, setQualityPreset] = useState<QualityPreset>("balanced");
+  const [smoothingCap, setSmoothingCap] = useState(QUALITY_PRESETS.balanced.smoothingCap);
+  const [fitError, setFitError] = useState(QUALITY_PRESETS.balanced.fitError);
+  const [cornerWindow, setCornerWindow] = useState(QUALITY_PRESETS.balanced.cornerWindow);
+  const [cornerAngle, setCornerAngle] = useState(QUALITY_PRESETS.balanced.cornerAngle);
+  const [tinyCurve, setTinyCurve] = useState(QUALITY_PRESETS.balanced.tinyCurve);
+  const [minAreaFraction, setMinAreaFraction] = useState(QUALITY_PRESETS.balanced.minAreaFraction);
+  const [componentStacking, setComponentStacking] = useState<ComponentStacking>(QUALITY_PRESETS.balanced.stacking);
+  const [advancedQualityOpen, setAdvancedQualityOpen] = useState(false);
   const [activeJobs, setActiveJobs] = useState<LayerJob[]>([]);
   const [activeViewBox, setActiveViewBox] = useState<string>("0 0 100 100");
   const [copied, setCopied] = useState(false);
@@ -126,6 +203,22 @@ export default function Page() {
   const dispCanvas = useRef<HTMLCanvasElement | null>(null);
 
   const addLog = (s: string) => setLog((l) => [...l, s]);
+
+  const applyQualityPreset = (preset: QualityPreset) => {
+    const config = QUALITY_PRESETS[preset];
+    setQualityPreset(preset);
+    setSmoothingCap(config.smoothingCap);
+    setFitError(config.fitError);
+    setCornerWindow(config.cornerWindow);
+    setCornerAngle(config.cornerAngle);
+    setTinyCurve(config.tinyCurve);
+    setMinAreaFraction(config.minAreaFraction);
+    setComponentStacking(config.stacking);
+    setScale(config.outputScale);
+    setPicks((previous) => previous.map((pick) =>
+      pick.role === "layer" ? { ...pick, profile: config.profile } : pick));
+    showToast(`${config.label} settings applied to all artwork layers`);
+  };
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -250,9 +343,9 @@ export default function Page() {
       hex: s.hex,
       role: "layer",
       name: `color-${i + 1}`,
-      profile: "organic"
+      profile: QUALITY_PRESETS[qualityPreset].profile
     }));
-  }, [colorMergeThreshold]);
+  }, [colorMergeThreshold, qualityPreset]);
 
   const extractQuantizedPalette = useCallback((targetK: number) => {
     if (!sampleCanvas.current || !img) return;
@@ -328,7 +421,7 @@ export default function Page() {
       hex: toHex(c[0], c[1], c[2]),
       role: nearBg(c, bg) ? "bg" : "layer",
       name: nearBg(c, bg) ? "background" : `color-${i + 1}`,
-      profile: "organic"
+      profile: QUALITY_PRESETS[qualityPreset].profile
     }));
 
     setPicks(newPicks);
@@ -336,7 +429,7 @@ export default function Page() {
     showToast(removed > 0
       ? `Quantized artwork into ${newPicks.length} clean colors (${removed} transition shade${removed === 1 ? "" : "s"} consolidated)`
       : `Quantized artwork into ${newPicks.length} layer colors`);
-  }, [img, colorMergeThreshold]);
+  }, [img, colorMergeThreshold, qualityPreset]);
 
   const autoExtractPalette = useCallback(() => {
     extractQuantizedPalette(kColorsCount);
@@ -472,7 +565,7 @@ export default function Page() {
           id: `lettering-${i}`, fill: v.fill,
           d: scalePathData(v.d, scale, -parsed.viewBox[0], -parsed.viewBox[1]),
         }));
-        const svg = assembleLayers(passthrough, viewBox, includeBg ? bgHex : null);
+        const svg = assembleLayers(passthrough, viewBox, includeBg ? bgHex : null, componentStacking);
         setImg({ url: URL.createObjectURL(file), w: parsed.width, h: parsed.height, isSvg: true });
         setActiveViewBox(viewBox);
         setRawSvgContent(svg);
@@ -508,7 +601,7 @@ export default function Page() {
 
     const extracted = extractWithBg(sCtx, image.naturalWidth, image.naturalHeight);
     if (extracted.length > 0) setPicks(extracted);
-  }, [extractDominantColors, scale, includeBg, bgHex]);
+  }, [extractDominantColors, scale, includeBg, bgHex, componentStacking]);
 
   const onCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const d = dispCanvas.current, s = sampleCanvas.current; if (!d || !s || !img) return;
@@ -538,9 +631,9 @@ export default function Page() {
         return prev;
       }
       showToast(`+ Added ${hex} as layer-${prev.length + 1}`);
-      return [...prev, { rgb, hex, role: "layer", name: `layer-${prev.length + 1}`, profile: "organic" }];
+      return [...prev, { rgb, hex, role: "layer", name: `layer-${prev.length + 1}`, profile: QUALITY_PRESETS[qualityPreset].profile }];
     });
-  }, [img]);
+  }, [img, qualityPreset]);
 
   const addCustomHexColor = () => {
     let hex = customHexInput.trim();
@@ -560,7 +653,7 @@ export default function Page() {
         return prev;
       }
       showToast(`+ Added custom ${hex}`);
-      return [...prev, { rgb, hex, role: "layer", name: `color-${prev.length + 1}`, profile: "organic" }];
+      return [...prev, { rgb, hex, role: "layer", name: `color-${prev.length + 1}`, profile: QUALITY_PRESETS[qualityPreset].profile }];
     });
     setCustomHexInput("#");
   };
@@ -631,7 +724,7 @@ export default function Page() {
         id: `lettering-${i}`, fill: v.fill,
         d: scalePathData(v.d, scale, -svgOrigin[0], -svgOrigin[1]),
       }));
-      const svg = assembleLayers([...ordered, ...passthrough], viewBox, includeBg ? bgHex : null);
+      const svg = assembleLayers([...ordered, ...passthrough], viewBox, includeBg ? bgHex : null, componentStacking);
       setRawSvgContent(svg);
       setSvgUrl(URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" })));
 
@@ -644,7 +737,7 @@ export default function Page() {
       };
       setReportUrl(URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" })));
       const sessionExport = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         generatedAt: new Date().toISOString(),
         source: sourceSnapshot ? {
           ...sourceSnapshot,
@@ -666,6 +759,16 @@ export default function Page() {
           colorMergeThreshold,
           colorPreviewEnabled: showQuantizedPreview,
           coverageMode: "nearest-isolated",
+          qualityPreset,
+          componentStacking,
+          quality: {
+            smoothingCap,
+            fitError,
+            cornerWindow,
+            cornerAngle,
+            tinyCurve,
+            minAreaFraction,
+          },
         },
         palette: picks.map((pick, index) => ({
           index,
@@ -706,6 +809,8 @@ export default function Page() {
   }, [
     includeBg, bgHex, svgVectors, svgOrigin, svgNote, scale, sourceSnapshot, img,
     stageBg, kColorsCount, colorMergeThreshold, showQuantizedPreview, picks, layerCoverages,
+    qualityPreset, componentStacking, smoothingCap, fitError, cornerWindow, cornerAngle,
+    tinyCurve, minAreaFraction,
   ]);
 
   useEffect(() => {
@@ -719,11 +824,11 @@ export default function Page() {
         id: `lettering-${i}`, fill: v.fill,
         d: scalePathData(v.d, scale, -svgOrigin[0], -svgOrigin[1]),
       }));
-      const svg = assembleLayers([...ordered, ...passthrough], activeViewBox, includeBg ? bgHex : null);
+      const svg = assembleLayers([...ordered, ...passthrough], activeViewBox, includeBg ? bgHex : null, componentStacking);
       setRawSvgContent(svg);
       setSvgUrl(URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" })));
     }
-  }, [includeBg, bgHex, results, activeJobs, activeViewBox, svgVectors, svgOrigin, scale]);
+  }, [includeBg, bgHex, results, activeJobs, activeViewBox, svgVectors, svgOrigin, scale, componentStacking]);
 
   useEffect(() => {
     if (activeJobs.length === 0 && svgVectors.length > 0 && img?.isSvg) {
@@ -732,12 +837,12 @@ export default function Page() {
         id: `lettering-${i}`, fill: v.fill,
         d: scalePathData(v.d, scale, -svgOrigin[0], -svgOrigin[1]),
       }));
-      const svg = assembleLayers(passthrough, viewBox, includeBg ? bgHex : null);
+      const svg = assembleLayers(passthrough, viewBox, includeBg ? bgHex : null, componentStacking);
       setActiveViewBox(viewBox);
       setRawSvgContent(svg);
       setSvgUrl(URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" })));
     }
-  }, [activeJobs.length, svgVectors, svgOrigin, img, scale, includeBg, bgHex]);
+  }, [activeJobs.length, svgVectors, svgOrigin, img, scale, includeBg, bgHex, componentStacking]);
 
   const runCustom = useCallback(async () => {
     if (!img) return;
@@ -747,14 +852,28 @@ export default function Page() {
     const pngB64 = await urlToB64(img.url);
     const capVal = Math.max(0.25, 2.0 / Math.max(1, scale / 2));
     const tolVal = Math.max(0.2, 1.0 / Math.max(1, scale / 2));
-    const jobs: LayerJob[] = layerPicks.map(({ p, i }, k) => ({
-      jobId: k, name: `user-${i}`, engine: p.profile === "geometric" ? "smooth3" : "smooth2",
-      useG1: p.profile === "geometric", file: "user.png", offset: [0, 0], palette, idx: i,
-      cfg: p.profile === "geometric" ? [capVal, tolVal, true, 25.0, 25.0] : null, scale, expected: null,
-      fill: p.hex, id: p.name,
-    }));
+    const jobs: LayerJob[] = layerPicks.map(({ p, i }, k) => {
+      const detailed = p.profile === "detailed";
+      return {
+        jobId: k, name: `user-${i}`, engine: p.profile === "geometric" ? "smooth3" : "smooth2",
+        useG1: p.profile === "geometric", file: "user.png", offset: [0, 0], palette, idx: i,
+        cfg: p.profile === "geometric" ? [capVal, tolVal, true, 25.0, 25.0] : null, scale,
+        quality: {
+          smoothingCap: detailed ? Math.min(smoothingCap, 0.75) : smoothingCap,
+          fitError: detailed ? Math.min(fitError, 0.12) : fitError,
+          cornerWindow: detailed ? Math.min(cornerWindow, 5) : cornerWindow,
+          cornerAngle: detailed ? Math.min(cornerAngle, 40) : cornerAngle,
+          tinyCurve: detailed ? Math.min(tinyCurve, 1) : tinyCurve,
+          minAreaFraction,
+        },
+        expected: null, fill: p.hex, id: p.name,
+      };
+    });
     await execute(jobs, { "user.png": pngB64 }, `0 0 ${img.w * scale} ${img.h * scale}`);
-  }, [img, picks, scale, execute]);
+  }, [
+    img, picks, scale, execute, smoothingCap, fitError, cornerWindow, cornerAngle,
+    tinyCurve, minAreaFraction,
+  ]);
 
   const onStageImageClick = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
     const s = sampleCanvas.current; if (!s || !img) return;
@@ -772,9 +891,9 @@ export default function Page() {
         return prev;
       }
       showToast(`+ Added ${hex} from stage as layer-${prev.length + 1}`);
-      return [...prev, { rgb, hex, role: "layer", name: `layer-${prev.length + 1}`, profile: "organic" }];
+      return [...prev, { rgb, hex, role: "layer", name: `layer-${prev.length + 1}`, profile: QUALITY_PRESETS[qualityPreset].profile }];
     });
-  }, [img]);
+  }, [img, qualityPreset]);
 
   const copySvgToClipboard = () => {
     if (!rawSvgContent) return;
@@ -1079,6 +1198,96 @@ export default function Page() {
                 )}
               </div>
 
+              <div className="rounded-xl bg-black/40 border border-[var(--panel-border)] p-2.5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-[var(--muted)] uppercase tracking-wider font-semibold">Logo Type</span>
+                  <button
+                    type="button"
+                    onClick={() => setAdvancedQualityOpen((open) => !open)}
+                    className="text-[10px] text-[var(--accent)] hover:underline"
+                  >
+                    {advancedQualityOpen ? "Hide Advanced" : "Advanced Controls"}
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-1">
+                  {(Object.keys(QUALITY_PRESETS) as QualityPreset[]).map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => applyQualityPreset(preset)}
+                      className={`rounded-lg px-2 py-1.5 text-[10px] font-semibold transition-all ${
+                        qualityPreset === preset
+                          ? "bg-[var(--accent)] text-black"
+                          : "bg-white/5 text-white/70 hover:bg-white/10"
+                      }`}
+                    >
+                      {QUALITY_PRESETS[preset].label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[9px] text-white/45 leading-tight">
+                  {QUALITY_PRESETS[qualityPreset].description}
+                </p>
+
+                <label className="flex items-center justify-between gap-2 text-[10px]">
+                  <span className="text-white/70">Component stacking</span>
+                  <select
+                    value={componentStacking}
+                    onChange={(e) => setComponentStacking(e.target.value as ComponentStacking)}
+                    className="rounded bg-[#16171b] border border-[var(--panel-border)] px-1.5 py-1 text-[10px] text-white"
+                  >
+                    <option value="palette">Palette order</option>
+                    <option value="large-first">Large shapes behind details</option>
+                  </select>
+                </label>
+
+                {advancedQualityOpen && (
+                  <div className="space-y-2 pt-2 border-t border-white/10">
+                    {[
+                      ["Smoothing", smoothingCap, setSmoothingCap, 0.35, 2, 0.05, `${smoothingCap.toFixed(2)} px`],
+                      ["Curve precision", fitError, setFitError, 0.04, 0.5, 0.01, `${fitError.toFixed(2)} px`],
+                      ["Corner window", cornerWindow, setCornerWindow, 2, 12, 0.5, `${cornerWindow.toFixed(1)} px`],
+                      ["Corner threshold", cornerAngle, setCornerAngle, 20, 85, 1, `${cornerAngle.toFixed(0)} deg`],
+                      ["Tiny curve cleanup", tinyCurve, setTinyCurve, 0, 4, 0.1, `${tinyCurve.toFixed(1)} px`],
+                    ].map(([label, value, setter, min, max, step, display]) => (
+                      <label key={label as string} className="block space-y-1">
+                        <span className="flex justify-between text-[9px] text-white/60">
+                          <span>{label as string}</span>
+                          <span className="font-mono text-[var(--accent)]">{display as string}</span>
+                        </span>
+                        <input
+                          type="range"
+                          min={min as number}
+                          max={max as number}
+                          step={step as number}
+                          value={value as number}
+                          onChange={(e) => (setter as React.Dispatch<React.SetStateAction<number>>)(Number(e.target.value))}
+                          className="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
+                        />
+                      </label>
+                    ))}
+                    <label className="block space-y-1">
+                      <span className="flex justify-between text-[9px] text-white/60">
+                        <span>Minimum detail area</span>
+                        <span className="font-mono text-[var(--accent)]">{(minAreaFraction * 100).toFixed(3)}%</span>
+                      </span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="0.001"
+                        step="0.00001"
+                        value={minAreaFraction}
+                        onChange={(e) => setMinAreaFraction(Number(e.target.value))}
+                        className="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
+                      />
+                    </label>
+                    <p className="text-[9px] text-white/35 leading-tight">
+                      Lower smoothing and cleanup preserve lettering and tiny illustration details. Higher values produce fewer nodes.
+                    </p>
+                  </div>
+                )}
+              </div>
+
               <ul className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
                 {picks.map((p, i) => (
                   <li key={p.hex + i} className="flex items-center gap-1.5 text-xs bg-black/40 p-1.5 rounded-lg border border-[var(--panel-border)] hover:border-white/20 transition-all group">
@@ -1122,7 +1331,8 @@ export default function Page() {
                         onChange={(e) => updatePick(i, { profile: e.target.value as Profile })}
                         className="rounded bg-[#16171b] border border-[var(--panel-border)] px-1 py-0.5 text-[10px] text-[var(--muted)] focus:outline-none focus:text-white"
                       >
-                        <option value="organic">Organic</option>
+                        <option value="organic">Smooth</option>
+                        <option value="detailed">Faithful</option>
                         <option value="geometric">Geometric</option>
                       </select>
                     )}

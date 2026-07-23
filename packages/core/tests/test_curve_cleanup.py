@@ -48,7 +48,20 @@ def test_meaningful_short_accent_edge_is_preserved():
     assert len(cleaned) == len(curves)
 
 
+def test_runtime_smoothing_cap_is_not_frozen_as_a_default_argument():
+    assert smooth2.smooth_arc.__defaults__[0] is None
+
+
 def test_production_smoothing_module_matches_core_source_byte_for_byte():
     core_module = PIPELINE / "smooth2.py"
     production_module = ROOT / "apps" / "web" / "public" / "pipeline" / "smooth2.py"
+    assert production_module.read_bytes() == core_module.read_bytes()
+
+
+def test_verifier_uses_runtime_output_scale_and_matches_production():
+    core_module = PIPELINE / "verify.py"
+    production_module = ROOT / "apps" / "web" / "public" / "pipeline" / "verify.py"
+    source = core_module.read_text(encoding="utf-8")
+
+    assert 'getattr(P, "SCALE", 2.0)' in source
     assert production_module.read_bytes() == core_module.read_bytes()

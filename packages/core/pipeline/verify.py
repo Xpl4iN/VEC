@@ -38,7 +38,7 @@ def rasterize(path, shape, off, k=K):
         r_end = min(r + chunk_rows, hk)
         ys, xs = np.mgrid[r:r_end, 0:wk]
         pts = np.column_stack([(xs.ravel() + 0.5) / k + off[0],
-                               (ys.ravel() + 0.5) / k + off[1]]) * 2.0  # paths are 2x
+                               (ys.ravel() + 0.5) / k + off[1]]) * getattr(P, "SCALE", 2.0)
         inside[r:r_end, :] = path.contains_points(pts).reshape(r_end - r, wk)
     return inside
 

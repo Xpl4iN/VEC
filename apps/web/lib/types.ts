@@ -12,6 +12,14 @@ export type LayerJob = {
   idx: number | null;                 // which palette colour this layer extracts
   cfg: [number, number | null, boolean, number, number] | null; // smooth3 CFG tuple
   scale?: number;                     // coordinate output scale multiplier (default 2.0)
+  quality?: {
+    smoothingCap: number;             // max Organic drift in source pixels
+    fitError: number;                 // cubic fit tolerance in source pixels
+    cornerWindow: number;             // arclength used to classify corners
+    cornerAngle: number;              // minimum turn angle considered a corner
+    tinyCurve: number;                // absorb shorter cubic chords
+    minAreaFraction: number;          // remove smaller disconnected raster regions
+  };
   expected: string | null;            // optional regression path for byte-identity
   // presentation (not sent to python)
   fill: string;
@@ -29,4 +37,4 @@ export type LayerResult = {
   cleanup: Array<[number, number[]]>;
 };
 
-export type Profile = "organic" | "geometric";
+export type Profile = "organic" | "detailed" | "geometric";

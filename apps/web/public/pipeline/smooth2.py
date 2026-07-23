@@ -15,6 +15,7 @@ import pipeline as P
 CAP = 1.35      # erase raster chatter while keeping intentional logo geometry
 FIT_ERR = 0.22  # prefer compact, editor-friendly curves over subpixel tracing
 DENSE = 0.25    # dense sampling step of the spline for the bezier fit
+TINY_CURVE = 2.0  # source-pixel chord threshold for editor-node cleanup
 
 
 def drop_tiny_curves(curves, min_len=2.0):
@@ -59,8 +60,9 @@ def _spline(pts, s, closed):
     return tck, u
 
 
-def smooth_arc(pts, closed, cap=CAP, tree=None):
+def smooth_arc(pts, closed, cap=None, tree=None):
     """Return densely sampled smoothed points for one arc."""
+    cap = CAP if cap is None else cap
     n = len(pts)
     if n < 8:
         return pts
@@ -124,7 +126,7 @@ def process(name):
                                       P.unit(q[-2] - q[-1]), err=FIT_ERR)
         if len(curves) == 0:
             continue
-        curves = drop_tiny_curves(curves)
+        curves = drop_tiny_curves(curves, TINY_CURVE)
         # fidelity of the final beziers
         samp = np.vstack([P._bez(c, np.linspace(0, 1, 40)) for c in curves])
         d, _ = tree.query(samp)

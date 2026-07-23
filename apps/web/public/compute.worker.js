@@ -42,8 +42,17 @@ function pyCfg(cfg) {
 }
 
 function processJob(job) {
-  const { name, engine, useG1, file, offset, palette, idx, cfg, scale } = job;
+  const { name, engine, useG1, file, offset, palette, idx, cfg, scale, quality } = job;
   const sVal = scale != null ? scale : 2.0;
+  const qCfg = quality || {};
+  const smoothingCap = Number.isFinite(qCfg.smoothingCap) ? qCfg.smoothingCap : 1.35;
+  const fitError = Number.isFinite(qCfg.fitError)
+    ? qCfg.fitError
+    : Math.max(0.14, Math.round((0.22 / Math.sqrt(sVal / 2.0)) * 1000) / 1000);
+  const cornerWindow = Number.isFinite(qCfg.cornerWindow) ? qCfg.cornerWindow : 8.0;
+  const cornerAngle = Number.isFinite(qCfg.cornerAngle) ? qCfg.cornerAngle : 55.0;
+  const tinyCurve = Number.isFinite(qCfg.tinyCurve) ? qCfg.tinyCurve : 2.0;
+  const minAreaFraction = Number.isFinite(qCfg.minAreaFraction) ? qCfg.minAreaFraction : 0.0002;
   // 1. register the layer definition into the pipeline dicts (runtime injection)
   let inject =
     "import importlib, math, pipeline, smooth2, smooth3, g1, orient, deloop, json\n" +
@@ -51,7 +60,12 @@ function processJob(job) {
     `pipeline.SCALE = ${sVal}\n` +
     `pipeline.Z = min(8, max(2, int(round(4 * math.sqrt(${sVal} / 2.0)))))\n` +
     `pipeline.STEP = max(0.15, round(0.30 / math.sqrt(${sVal} / 2.0), 3))\n` +
-    `smooth2.FIT_ERR = max(0.14, round(0.22 / math.sqrt(${sVal} / 2.0), 3))\n` +
+    `pipeline.CORNER_WIN = ${cornerWindow}\n` +
+    `pipeline.CORNER_DEG = ${cornerAngle}\n` +
+    `pipeline.MIN_AREA_FRACTION = ${minAreaFraction}\n` +
+    `smooth2.CAP = ${smoothingCap}\n` +
+    `smooth2.FIT_ERR = ${fitError}\n` +
+    `smooth2.TINY_CURVE = ${tinyCurve}\n` +
     `smooth3.FIT_ERR = max(0.02, round(0.05 / math.sqrt(${sVal} / 2.0), 3))\n` +
     `pipeline.LAYERS[${q(name)}] = (${q(file)}, (${offset[0]}, ${offset[1]}), ${pyPalette(palette)}, ${idx == null ? "None" : idx})\n`;
   if (engine === "smooth3") inject += `smooth3.CFG[${q(name)}] = ${pyCfg(cfg)}\n`;
