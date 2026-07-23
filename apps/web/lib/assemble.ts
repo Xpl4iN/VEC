@@ -13,10 +13,14 @@ export function assembleLayers(layers: AssembledLayer[], viewBox: string, bgFill
   const h = parts[3] ?? "100";
   const bgRect = bgFill ? `    <rect width="${w}" height="${h}" fill="${escapeAttr(bgFill)}"/>\n` : "";
   const paths = layers
-    // A one-output-pixel centered underpaint closes antialiasing seams between
-    // independently fitted neighboring layers. Half of it sits outside the
-    // contour, which is 0.25 source px at the default 2x export scale.
-    .map((l) => `    <path id="${escapeAttr(l.id)}" fill="${escapeAttr(l.fill)}" stroke="${escapeAttr(l.fill)}" stroke-width="1" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke fill" fill-rule="evenodd" d="${l.d}"/>`)
+    // Cumulative masks provide the structural underpaint. A progressively
+    // wider, sharp stroke lets later layers fully cover earlier edge
+    // antialiasing without rounding or extending hard shade endpoints.
+    .map((l, i) => {
+      const progress = layers.length > 1 ? i / (layers.length - 1) : 1;
+      const strokeWidth = (0.5 + 1.5 * progress).toFixed(2).replace(/\.?0+$/, "");
+      return `    <path id="${escapeAttr(l.id)}" fill="${escapeAttr(l.fill)}" stroke="${escapeAttr(l.fill)}" stroke-width="${strokeWidth}" stroke-linejoin="miter" stroke-linecap="butt" stroke-miterlimit="2" paint-order="stroke fill" fill-rule="evenodd" d="${l.d}"/>`;
+    })
     .join("\n");
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" width="${w}" height="${h}">`,
