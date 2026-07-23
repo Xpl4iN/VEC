@@ -13,32 +13,67 @@ negative intersection result.
 import re
 import numpy as np
 
-NUM = re.compile(r'-?\d*\.?\d+(?:[eE][-+]?\d+)?')
+NUM_TEXT = r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?'
+TOKEN = re.compile(rf'[MCZ]|{NUM_TEXT}')
+
+
+def _tokenize(d):
+    """Return command/number tokens, or None when any input is unparsed."""
+    tokens, end = [], 0
+    for match in TOKEN.finditer(d):
+        if d[end:match.start()].strip(' \t\r\n,'):
+            return None
+        tokens.append(match.group())
+        end = match.end()
+    if d[end:].strip(' \t\r\n,'):
+        return None
+    return tokens
+
+
+def _parse_tokens(d):
+    """Parse the exact absolute M (C+ ) Z grammar emitted by the pipeline."""
+    tokens = _tokenize(d)
+    if not tokens:
+        return None
+    subs, i = [], 0
+    try:
+        while i < len(tokens):
+            if tokens[i] != 'M':
+                return None
+            cur = np.array([float(tokens[i + 1]), float(tokens[i + 2])])
+            if not np.isfinite(cur).all():
+                return None
+            curves, i = [], i + 3
+            while i < len(tokens) and tokens[i] == 'C':
+                values = [float(value) for value in tokens[i + 1:i + 7]]
+                if len(values) != 6:
+                    return None
+                c1 = np.array(values[:2])
+                c2 = np.array(values[2:4])
+                end = np.array(values[4:6])
+                if not all(np.isfinite(points).all() for points in (c1, c2, end)):
+                    return None
+                curves.append((cur, c1, c2, end))
+                cur, i = end, i + 7
+            if not curves or i >= len(tokens) or tokens[i] != 'Z':
+                return None
+            subs.append(curves)
+            i += 1
+    except (IndexError, ValueError):
+        return None
+    return subs
 
 
 def parse_subpaths(d):
     """Absolute M/C/Z only. Returns list of subpaths, each a list of
     (p0, c1, c2, p3) cubic tuples. Reads nothing from relative/quadratic data."""
-    subs = []
-    for chunk in re.findall(r'M[^M]*', d):
-        v = [float(x) for x in NUM.findall(chunk)]
-        if len(v) < 2:
-            continue
-        cur = np.array(v[:2]); rest = v[2:]; curves = []
-        for i in range(0, len(rest) - 5, 6):
-            c1 = np.array(rest[i:i+2]); c2 = np.array(rest[i+2:i+4]); e = np.array(rest[i+4:i+6])
-            curves.append((cur, c1, c2, e)); cur = e
-        subs.append(curves)
-    return subs
+    return _parse_tokens(d) or []
 
 
 def parse_is_trustworthy(d):
     """True only if the input is absolute M/C/Z AND parsed to real geometry.
     Guards against the silent-no-op failure on relative/quadratic input."""
-    if re.search(r'[mcqtsahlvzMQTSAHLV]', d.replace('M', '').replace('C', '').replace('Z', '')):
-        return False
-    subs = parse_subpaths(d)
-    return sum(len(s) for s in subs) > 0
+    return _parse_tokens(d) is not None
 
 
 def emit_subpath(curves):

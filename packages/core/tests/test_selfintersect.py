@@ -41,6 +41,18 @@ def test_parser_rejects_unsupported_or_empty_geometry():
         assert not DL.parse_is_trustworthy(path)
 
 
+def test_parser_accepts_scientific_notation_and_explicit_signs():
+    path = "M+1e-05,-2E+2C.5 0 1. 1 2e0 2Z"
+    assert DL.parse_is_trustworthy(path)
+    assert len(DL.parse_subpaths(path)) == 1
+
+
+def test_parser_rejects_truncated_or_trailing_data():
+    assert not DL.parse_is_trustworthy("M0 0C1 1 2 2Z")
+    assert not DL.parse_is_trustworthy("M0 0C1 1 2 2 3 3Z garbage")
+    assert not DL.parse_is_trustworthy("M1e999 0C1 1 2 2 3 3Z")
+
+
 def test_deloop_removes_a_synthetic_self_intersection():
     # An odd sampling density keeps the exact centre crossing inside sampled
     # line segments rather than placing it on their shared endpoint.
