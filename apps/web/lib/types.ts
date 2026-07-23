@@ -20,6 +20,11 @@ export type LayerJob = {
     tinyCurve: number;                // absorb shorter cubic chords
     minAreaFraction: number;          // remove smaller disconnected raster regions
   };
+  refinement?: {
+    pass: number;                     // 1 = initial vectorization, 2/3 = refinement
+    gapCloseRadius: number;           // close gaps up to roughly 2x this source-pixel radius
+    edgeSmoothing: number;            // multiplier applied to the previous smoothing budget
+  };
   expected: string | null;            // optional regression path for byte-identity
   // presentation (not sent to python)
   fill: string;

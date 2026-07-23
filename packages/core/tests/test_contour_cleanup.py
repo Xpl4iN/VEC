@@ -35,6 +35,26 @@ def test_adaptive_cleanup_preserves_meaningful_small_regions():
     assert cleaned[55, 55] == 1.0
 
 
+def test_refinement_closes_narrow_gaps_without_changing_the_initial_pass():
+    field = np.zeros((80, 80), dtype=float)
+    field[20:60, 10:35] = 1.0
+    field[20:60, 37:70] = 1.0
+    previous_radius = P.GAP_CLOSE_RADIUS
+    try:
+        P.GAP_CLOSE_RADIUS = 0
+        initial, _ = P.clean_contour_field(field)
+        P.GAP_CLOSE_RADIUS = 2
+        refined, _ = P.clean_contour_field(field)
+    finally:
+        P.GAP_CLOSE_RADIUS = previous_radius
+
+    assert initial[40, 35] == 0.0
+    assert initial[40, 36] == 0.0
+    assert refined[40, 35] == 1.0
+    assert refined[40, 36] == 1.0
+    assert np.all(refined[22:58, 12:68])
+
+
 def test_corner_window_rejects_stair_steps_but_keeps_square_corners():
     points = []
     for a, b in [

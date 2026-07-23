@@ -11,9 +11,12 @@ export type PoolEvents = {
   onLayer?: (r: LayerResult) => void;
 };
 
-export function choosePoolSize(nLayers: number): number {
+export function choosePoolSize(_nLayers: number): number {
   const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4;
-  return Math.max(1, Math.min(cores - 1, 4, nLayers));
+  // This application deliberately prioritizes throughput over keeping the
+  // device responsive. Keep the full pool warm even when the current pass has
+  // fewer layers, since later passes and uploads can reuse every interpreter.
+  return Math.max(1, Math.min(cores, 4));
 }
 
 export class ComputePool {
@@ -27,6 +30,8 @@ export class ComputePool {
   ) {}
 
   private log(m: string) { this.events.onProgress?.(m); }
+
+  setEvents(events: PoolEvents) { this.events = events; }
 
   private bootOne(w: Worker, pngs: Record<string, string>): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -48,6 +53,21 @@ export class ComputePool {
     await Promise.all(this.workers.slice(1).map((w) => this.bootOne(w, this.pngs)));
     this.booted = true;
     this.log(`pool ready: ${size} workers`);
+  }
+
+  async setPngs(pngs: Record<string, string>) {
+    if (!this.booted) throw new Error("pool not booted");
+    this.pngs = { ...this.pngs, ...pngs };
+    await Promise.all(this.workers.map((worker) => new Promise<void>((resolve, reject) => {
+      const onMsg = (event: MessageEvent) => {
+        if (event.data.type !== "pngsLoaded") return;
+        worker.removeEventListener("message", onMsg);
+        resolve();
+      };
+      worker.addEventListener("message", onMsg);
+      worker.addEventListener("error", (event) => reject(new Error(event.message)), { once: true });
+      worker.postMessage({ cmd: "pngs", pngs });
+    })));
   }
 
   // Greedy dispatch: each worker pulls the next job when it finishes its current one.

@@ -4,7 +4,7 @@ import { useCallback, useRef, useState, useEffect } from "react";
 import { assembleLayers, type AssembledLayer, type ComponentStacking } from "@/lib/assemble";
 import { consolidateSimilarColors } from "@/lib/palette";
 import { parseSvgInput, compositeRasters, scalePathData, type VectorPath } from "@/lib/svgInput";
-import { ComputePool, choosePoolSize } from "@/lib/pool";
+import { ComputePool, choosePoolSize, type PoolEvents } from "@/lib/pool";
 import type { LayerJob, LayerResult, Profile } from "@/lib/types";
 
 // Detect the background colour from an image's border (a logo's background is
@@ -155,6 +155,9 @@ export default function Page() {
   const [minAreaFraction, setMinAreaFraction] = useState(QUALITY_PRESETS.balanced.minAreaFraction);
   const [componentStacking, setComponentStacking] = useState<ComponentStacking>(QUALITY_PRESETS.balanced.stacking);
   const [advancedQualityOpen, setAdvancedQualityOpen] = useState(false);
+  const [refinementPass, setRefinementPass] = useState(1);
+  const [gapCloseRadius, setGapCloseRadius] = useState(1);
+  const [refinementSmoothing, setRefinementSmoothing] = useState(1.15);
   const [activeJobs, setActiveJobs] = useState<LayerJob[]>([]);
   const [activeViewBox, setActiveViewBox] = useState<string>("0 0 100 100");
   const [copied, setCopied] = useState(false);
@@ -198,6 +201,7 @@ export default function Page() {
   const [isAnimatingReveal, setIsAnimatingReveal] = useState(false);
   const sliderRef = useRef<HTMLDivElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
+  const computePoolRef = useRef<ComputePool | null>(null);
 
   const sampleCanvas = useRef<HTMLCanvasElement | null>(null);
   const dispCanvas = useRef<HTMLCanvasElement | null>(null);
@@ -247,6 +251,7 @@ export default function Page() {
     setLog([]);
     setActiveJobs([]);
     setCopied(false);
+    setRefinementPass(1);
     setSliderPos(0);
     setIsAnimatingReveal(false);
     resetSteps();
@@ -255,6 +260,11 @@ export default function Page() {
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [log]);
+
+  useEffect(() => () => {
+    computePoolRef.current?.terminate();
+    computePoolRef.current = null;
+  }, []);
 
   // Sync sampleCanvas to dispCanvas whenever img or DOM ref changes
   const renderDispCanvas = useCallback(() => {
@@ -680,14 +690,14 @@ export default function Page() {
 
   // ---- run --------------------------------------------------------------
   const execute = useCallback(async (jobs: LayerJob[], pngs: Record<string, string>, viewBox: string) => {
-    setRunning(true); reset(); setActiveJobs(jobs); setActiveViewBox(viewBox); setSliderPos(0); setIsAnimatingReveal(false);
+    const pass = jobs[0]?.refinement?.pass ?? 1;
+    setRunning(true); reset(); setRefinementPass(pass); setActiveJobs(jobs); setActiveViewBox(viewBox); setSliderPos(0); setIsAnimatingReveal(false);
     const size = choosePoolSize(jobs.length);
     setPoolSize(size);
 
     updateStepStatus("boot", "running", `Booting ${size} Pyodide web worker(s)...`);
 
-    const sources = await loadPipelineSources();
-    const pool = new ComputePool(sources, pngs, {
+    const events: PoolEvents = {
       onProgress: (msg) => {
         addLog(msg);
         if (msg.includes("Worker") && msg.includes("ready")) {
@@ -698,12 +708,23 @@ export default function Page() {
         setResults((rs) => [...rs, r]);
         updateStepStatus("compute", "running", `Computed layer ${r.name} (${r.nodes} nodes)`);
       }
-    });
+    };
+    let pool = computePoolRef.current;
 
     const t0 = performance.now();
     try {
-      await pool.boot(size);
-      updateStepStatus("boot", "completed", `${size} Workers active`);
+      if (!pool) {
+        const sources = await loadPipelineSources();
+        pool = new ComputePool(sources, pngs, events);
+        computePoolRef.current = pool;
+        await pool.boot(size);
+        updateStepStatus("boot", "completed", `${size} workers loaded and retained`);
+      } else {
+        pool.setEvents(events);
+        updateStepStatus("boot", "running", `${size} warm workers already loaded; replacing raster data...`);
+        await pool.setPngs(pngs);
+        updateStepStatus("boot", "completed", `${size} warm workers reused`);
+      }
 
       updateStepStatus("prepare", "completed", `${jobs.length} jobs assigned`);
       updateStepStatus("compute", "running", `Processing ${jobs.length} vector layer(s)...`);
@@ -730,6 +751,11 @@ export default function Page() {
 
       const report = {
         poolSize: size, wallSeconds: +wall, viewBox,
+        refinement: {
+          pass: jobs[0]?.refinement?.pass ?? 1,
+          gapCloseRadius: jobs[0]?.refinement?.gapCloseRadius ?? 0,
+          edgeSmoothing: jobs[0]?.refinement?.edgeSmoothing ?? 1,
+        },
         layers: res.map((r) => ({
           name: r.name, nodes: r.nodes, iou: r.iou, mean: r.mean,
           byteIdentical: r.identical, cleanup: r.cleanup,
@@ -737,7 +763,7 @@ export default function Page() {
       };
       setReportUrl(URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" })));
       const sessionExport = {
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: new Date().toISOString(),
         source: sourceSnapshot ? {
           ...sourceSnapshot,
@@ -768,6 +794,11 @@ export default function Page() {
             cornerAngle,
             tinyCurve,
             minAreaFraction,
+          },
+          refinement: {
+            pass: jobs[0]?.refinement?.pass ?? 1,
+            gapCloseRadius: jobs[0]?.refinement?.gapCloseRadius ?? 0,
+            edgeSmoothing: jobs[0]?.refinement?.edgeSmoothing ?? 1,
           },
         },
         palette: picks.map((pick, index) => ({
@@ -803,8 +834,10 @@ export default function Page() {
       updateStepStatus("compute", "error", "Pipeline execution failed");
       updateStepStatus("assemble", "error", String(err));
       addLog("ERROR: " + String(err));
+      pool?.terminate();
+      computePoolRef.current = null;
     } finally {
-      pool.terminate(); setRunning(false);
+      setRunning(false);
     }
   }, [
     includeBg, bgHex, svgVectors, svgOrigin, svgNote, scale, sourceSnapshot, img,
@@ -866,6 +899,7 @@ export default function Page() {
           tinyCurve: detailed ? Math.min(tinyCurve, 1) : tinyCurve,
           minAreaFraction,
         },
+        refinement: { pass: 1, gapCloseRadius: 0, edgeSmoothing: 1 },
         expected: null, fill: p.hex, id: p.name,
       };
     });
@@ -873,6 +907,24 @@ export default function Page() {
   }, [
     img, picks, scale, execute, smoothingCap, fitError, cornerWindow, cornerAngle,
     tinyCurve, minAreaFraction,
+  ]);
+
+  const runRefinement = useCallback(async () => {
+    if (!img || activeJobs.length === 0 || running) return;
+    const nextPass = Math.min(3, refinementPass + 1);
+    const pngB64 = await urlToB64(img.url);
+    const jobs = activeJobs.map((job) => ({
+      ...job,
+      refinement: {
+        pass: nextPass,
+        gapCloseRadius,
+        edgeSmoothing: refinementSmoothing,
+      },
+    }));
+    await execute(jobs, { [jobs[0].file]: pngB64 }, activeViewBox);
+  }, [
+    img, activeJobs, activeViewBox, running, refinementPass, gapCloseRadius,
+    refinementSmoothing, execute,
   ]);
 
   const onStageImageClick = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
@@ -1287,6 +1339,62 @@ export default function Page() {
                   </div>
                 )}
               </div>
+
+              {results.length > 0 && activeJobs.length > 0 && (
+                <div className="rounded-xl border border-[var(--accent)]/30 bg-[var(--accent)]/5 p-2.5 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-[10px] font-bold uppercase tracking-wider text-[var(--accent)]">
+                        Edge refinement
+                      </h3>
+                      <p className="text-[9px] text-white/45">
+                        Pass {refinementPass} of 3, using the previous layer jobs and source mask.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={running || refinementPass >= 3}
+                      onClick={runRefinement}
+                      className="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-[10px] font-bold text-black disabled:cursor-not-allowed disabled:opacity-35"
+                    >
+                      {refinementPass >= 3 ? "Pass 3 complete" : `Run pass ${refinementPass + 1}`}
+                    </button>
+                  </div>
+                  <label className="block space-y-1">
+                    <span className="flex justify-between text-[9px] text-white/60">
+                      <span>Close small gaps</span>
+                      <span className="font-mono text-[var(--accent)]">{gapCloseRadius.toFixed(1)} px</span>
+                    </span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="4"
+                      step="1"
+                      value={gapCloseRadius}
+                      onChange={(e) => setGapCloseRadius(Number(e.target.value))}
+                      className="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="flex justify-between text-[9px] text-white/60">
+                      <span>Edge smoothing</span>
+                      <span className="font-mono text-[var(--accent)]">{refinementSmoothing.toFixed(2)}x</span>
+                    </span>
+                    <input
+                      type="range"
+                      min="0.8"
+                      max="1.5"
+                      step="0.05"
+                      value={refinementSmoothing}
+                      onChange={(e) => setRefinementSmoothing(Number(e.target.value))}
+                      className="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
+                    />
+                  </label>
+                  <p className="text-[9px] text-white/35 leading-tight">
+                    Gap closing is applied before contour fitting. Smoothing then refits the closed edge while keeping the original palette, stacking, and editability.
+                  </p>
+                </div>
+              )}
 
               <ul className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
                 {picks.map((p, i) => (

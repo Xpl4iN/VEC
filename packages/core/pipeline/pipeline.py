@@ -14,7 +14,7 @@ Pipeline per layer:
 import sys, json, math
 import numpy as np
 from PIL import Image
-from scipy.ndimage import binary_dilation, label, zoom
+from scipy.ndimage import binary_closing, binary_dilation, label, zoom
 from scipy.spatial import cKDTree
 from skimage.measure import find_contours
 
@@ -30,6 +30,7 @@ LAM, MU = 0.55, -0.58
 FIT_ERR = 0.25     # bezier fit tolerance, source px
 MIN_AREA = 2.0     # drop specks smaller than this, source px^2
 MIN_AREA_FRACTION = 0.0002  # discard palette freckles below 0.02% of the canvas
+GAP_CLOSE_RADIUS = 0.0  # optional refinement pass, in source pixels
 COVERAGE_MODE = "nearest-isolated"  # one editable SVG layer per palette color
 INTERIOR_SHADE_MERGE_DISTANCE = 45.0
 INTERIOR_NEIGHBOR_RATIO = 0.75
@@ -117,6 +118,15 @@ def clean_contour_field(field):
     cleaned = field.copy()
     min_pixels = max(int(MIN_AREA), int(round(field.size * MIN_AREA_FRACTION)))
     mask = cleaned >= 0.5
+    radius = max(0, int(math.ceil(GAP_CLOSE_RADIUS)))
+    if radius:
+        yy, xx = np.ogrid[-radius:radius + 1, -radius:radius + 1]
+        footprint = xx * xx + yy * yy <= radius * radius
+        padded = np.pad(mask, radius, mode="constant")
+        closed = binary_closing(padded, structure=footprint)
+        closed = closed[radius:-radius, radius:-radius]
+        cleaned[closed & ~mask] = 1.0
+        mask = closed
     components, count = label(mask)
     if count:
         sizes = np.bincount(components.ravel())

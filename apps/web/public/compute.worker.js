@@ -23,10 +23,10 @@ async function boot(pipelineSources, pngs) {
   post({ type: "booted", ver });
 }
 
-function loadPngs(pngs) {
+function loadPngs(pngs, overwrite = false) {
   if (!pngs) return;
   for (const [name, b64] of Object.entries(pngs)) {
-    if (writtenPngs.has(name)) continue;
+    if (!overwrite && writtenPngs.has(name)) continue;
     pyodide.FS.writeFile(name, Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
     writtenPngs.add(name);
   }
@@ -42,7 +42,7 @@ function pyCfg(cfg) {
 }
 
 function processJob(job) {
-  const { name, engine, useG1, file, offset, palette, idx, cfg, scale, quality } = job;
+  const { name, engine, useG1, file, offset, palette, idx, cfg, scale, quality, refinement } = job;
   const sVal = scale != null ? scale : 2.0;
   const qCfg = quality || {};
   const smoothingCap = Number.isFinite(qCfg.smoothingCap) ? qCfg.smoothingCap : 1.35;
@@ -53,6 +53,9 @@ function processJob(job) {
   const cornerAngle = Number.isFinite(qCfg.cornerAngle) ? qCfg.cornerAngle : 55.0;
   const tinyCurve = Number.isFinite(qCfg.tinyCurve) ? qCfg.tinyCurve : 2.0;
   const minAreaFraction = Number.isFinite(qCfg.minAreaFraction) ? qCfg.minAreaFraction : 0.0002;
+  const refineCfg = refinement || {};
+  const gapCloseRadius = Number.isFinite(refineCfg.gapCloseRadius) ? refineCfg.gapCloseRadius : 0;
+  const edgeSmoothing = Number.isFinite(refineCfg.edgeSmoothing) ? refineCfg.edgeSmoothing : 1;
   // 1. register the layer definition into the pipeline dicts (runtime injection)
   let inject =
     "import importlib, math, pipeline, smooth2, smooth3, g1, orient, deloop, json\n" +
@@ -63,7 +66,8 @@ function processJob(job) {
     `pipeline.CORNER_WIN = ${cornerWindow}\n` +
     `pipeline.CORNER_DEG = ${cornerAngle}\n` +
     `pipeline.MIN_AREA_FRACTION = ${minAreaFraction}\n` +
-    `smooth2.CAP = ${smoothingCap}\n` +
+    `pipeline.GAP_CLOSE_RADIUS = ${gapCloseRadius}\n` +
+    `smooth2.CAP = ${smoothingCap * edgeSmoothing}\n` +
     `smooth2.FIT_ERR = ${fitError}\n` +
     `smooth2.TINY_CURVE = ${tinyCurve}\n` +
     `smooth3.FIT_ERR = max(0.02, round(0.05 / math.sqrt(${sVal} / 2.0), 3))\n` +
@@ -111,6 +115,7 @@ function processJob(job) {
     paletteIndex: idx,
     selectedColor: idx == null || !palette ? null : palette[idx],
     cfg,
+    refinement,
   };
   const cleanup = JSON.parse(pyodide.runPython([
     `_vec_context = json.loads(${q(JSON.stringify(cleanupContext))})`,
@@ -134,7 +139,7 @@ self.onmessage = async (e) => {
   const d = e.data;
   try {
     if (d.cmd === "boot") await boot(d.pipelineSources, d.pngs);
-    else if (d.cmd === "pngs") { loadPngs(d.pngs); post({ type: "pngsLoaded" }); }
+    else if (d.cmd === "pngs") { loadPngs(d.pngs, true); post({ type: "pngsLoaded" }); }
     else if (d.cmd === "job") {
       const t = performance.now();
       const r = processJob(d.job);
