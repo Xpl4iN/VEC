@@ -49,6 +49,13 @@ npm ci
 npm run build
 ```
 
+## Vercel deployment
+
+The root `vercel.json` configures Vercel to build the application in
+`apps/web`, even when the repository root is selected in the dashboard.
+Alternatively, set the Vercel project Root Directory to `apps/web` and use
+the Next.js framework preset.
+
 ## Repository layout
 
 ```text
