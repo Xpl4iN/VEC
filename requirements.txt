@@ -1,0 +1,7 @@
+# CPython pipeline stack pinned to versions compatible with Python 3.9.
+numpy==1.26.4
+scipy==1.13.1
+scikit-image==0.24.0
+pillow
+matplotlib          # verification oracle, test-only and not shipped
+pytest
