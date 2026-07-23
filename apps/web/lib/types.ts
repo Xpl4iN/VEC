@@ -24,6 +24,7 @@ export type LayerJob = {
     pass: number;                     // 1 = initial vectorization, 2/3 = refinement
     gapCloseRadius: number;           // close gaps up to roughly 2x this source-pixel radius
     edgeSmoothing: number;            // multiplier applied to the previous smoothing budget
+    source?: "original-raster" | "previous-svg";
   };
   expected: string | null;            // optional regression path for byte-identity
   // presentation (not sent to python)

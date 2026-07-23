@@ -8,10 +8,11 @@ editable SVG. Processing runs locally in the browser through Pyodide.
 - PNG, WebP, and SVG input
 - Automatic color reduction with manual palette controls
 - Dominant-color consolidation that removes transition shades without shifting source colors
+- Topology-aware palette cleanup that rejects fragmented antialias clusters while preserving contiguous shadow accents
 - Balanced, Illustrated, Maximum Detail, and Geometric logo presets
 - Per-layer Smooth, Faithful, and Geometric vectorization profiles
 - Advanced controls for smoothing, curve precision, corner detection, tiny-curve cleanup, and minimum detail area
-- Optional second and third refinement passes with source-mask gap closing and controlled edge refitting
+- Optional second and third refinement passes driven by the previous SVG, with source-mask gap closing and controlled edge refitting
 - Configurable palette-order or size-aware component stacking
 - Stroke-free SVG export with disconnected accents split into editor-selectable objects
 - Hole-aware component grouping so counters remain transparent

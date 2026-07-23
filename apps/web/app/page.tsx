@@ -38,6 +38,70 @@ type StageBg = "dark" | "light" | "black" | "checker";
 type SourceSnapshot = { name: string; type: string; size: number; dataUrl: string };
 type QualityPreset = "balanced" | "illustrated" | "faithful" | "geometric";
 
+function analyzePaletteTopology(
+  pixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+  palette: Pick[],
+) {
+  const assignments = new Int16Array(width * height);
+  assignments.fill(-1);
+  const counts = new Array(palette.length).fill(0);
+  let opaquePixels = 0;
+  for (let pixel = 0; pixel < width * height; pixel++) {
+    const offset = pixel * 4;
+    if (pixels[offset + 3] < 50) continue;
+    opaquePixels++;
+    let nearest = 0;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < palette.length; index++) {
+      const [r, g, b] = palette[index].rgb;
+      const distance =
+        (pixels[offset] - r) ** 2 +
+        (pixels[offset + 1] - g) ** 2 +
+        (pixels[offset + 2] - b) ** 2;
+      if (distance < nearestDistance) {
+        nearest = index;
+        nearestDistance = distance;
+      }
+    }
+    assignments[pixel] = nearest;
+    counts[nearest]++;
+  }
+
+  const visited = new Uint8Array(assignments.length);
+  const largestComponents = new Array(palette.length).fill(0);
+  const componentCounts = new Array(palette.length).fill(0);
+  const stack = new Int32Array(assignments.length);
+  for (let start = 0; start < assignments.length; start++) {
+    const color = assignments[start];
+    if (color < 0 || visited[start]) continue;
+    let size = 0;
+    let stackSize = 1;
+    stack[0] = start;
+    visited[start] = 1;
+    while (stackSize) {
+      const pixel = stack[--stackSize];
+      size++;
+      const x = pixel % width;
+      const neighbors = [
+        x > 0 ? pixel - 1 : -1,
+        x + 1 < width ? pixel + 1 : -1,
+        pixel >= width ? pixel - width : -1,
+        pixel + width < assignments.length ? pixel + width : -1,
+      ];
+      for (const neighbor of neighbors) {
+        if (neighbor < 0 || visited[neighbor] || assignments[neighbor] !== color) continue;
+        visited[neighbor] = 1;
+        stack[stackSize++] = neighbor;
+      }
+    }
+    componentCounts[color]++;
+    largestComponents[color] = Math.max(largestComponents[color], size);
+  }
+  return { counts, opaquePixels, largestComponents, componentCounts };
+}
+
 const QUALITY_PRESETS: Record<QualityPreset, {
   label: string;
   description: string;
@@ -79,14 +143,14 @@ const QUALITY_PRESETS: Record<QualityPreset, {
   },
   faithful: {
     label: "Maximum Detail",
-    description: "Preserve tiny features and typography with more editable nodes.",
+    description: "High coordinate precision with artifact cleanup kept strong enough for an editable result.",
     profile: "detailed",
-    smoothingCap: 0.45,
+    smoothingCap: 0.75,
     fitError: 0.08,
-    cornerWindow: 4,
-    cornerAngle: 32,
-    tinyCurve: 0.5,
-    minAreaFraction: 0.00001,
+    cornerWindow: 7,
+    cornerAngle: 50,
+    tinyCurve: 1.5,
+    minAreaFraction: 0.0001,
     stacking: "large-first",
     outputScale: 3,
   },
@@ -122,6 +186,26 @@ async function fileToB64(blob: Blob): Promise<string> {
   return btoa(s);
 }
 async function urlToB64(url: string): Promise<string> { return fileToB64(await (await fetch(url)).blob()); }
+
+async function rasterizeSvgToB64(svg: string, width: number, height: number): Promise<string> {
+  const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+  try {
+    const image = new Image();
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error("Could not rasterize the previous SVG refinement result"));
+      image.src = url;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d")!.drawImage(image, 0, 0, width, height);
+    return fileToB64(await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Could not encode refinement raster")), "image/png")));
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 
 async function loadPipelineSources(): Promise<Record<string, string>> {
   const src: Record<string, string> = {};
@@ -689,7 +773,12 @@ export default function Page() {
   };
 
   // ---- run --------------------------------------------------------------
-  const execute = useCallback(async (jobs: LayerJob[], pngs: Record<string, string>, viewBox: string) => {
+  const execute = useCallback(async (
+    jobs: LayerJob[],
+    pngs: Record<string, string>,
+    viewBox: string,
+    paletteSnapshot: Pick[] = picks,
+  ) => {
     const pass = jobs[0]?.refinement?.pass ?? 1;
     setRunning(true); reset(); setRefinementPass(pass); setActiveJobs(jobs); setActiveViewBox(viewBox); setSliderPos(0); setIsAnimatingReveal(false);
     const size = choosePoolSize(jobs.length);
@@ -755,6 +844,7 @@ export default function Page() {
           pass: jobs[0]?.refinement?.pass ?? 1,
           gapCloseRadius: jobs[0]?.refinement?.gapCloseRadius ?? 0,
           edgeSmoothing: jobs[0]?.refinement?.edgeSmoothing ?? 1,
+          source: jobs[0]?.refinement?.source ?? "original-raster",
         },
         layers: res.map((r) => ({
           name: r.name, nodes: r.nodes, iou: r.iou, mean: r.mean,
@@ -799,9 +889,10 @@ export default function Page() {
             pass: jobs[0]?.refinement?.pass ?? 1,
             gapCloseRadius: jobs[0]?.refinement?.gapCloseRadius ?? 0,
             edgeSmoothing: jobs[0]?.refinement?.edgeSmoothing ?? 1,
+            source: jobs[0]?.refinement?.source ?? "original-raster",
           },
         },
-        palette: picks.map((pick, index) => ({
+        palette: paletteSnapshot.map((pick, index) => ({
           index,
           ...pick,
           coveragePercent: layerCoverages[pick.hex] ?? null,
@@ -879,51 +970,103 @@ export default function Page() {
 
   const runCustom = useCallback(async () => {
     if (!img) return;
-    const palette = picks.map((p) => p.rgb);
-    const layerPicks = picks.map((p, i) => ({ p, i })).filter(({ p }) => p.role === "layer");
+    const canvas = sampleCanvas.current;
+    const sourcePixels = canvas?.getContext("2d")?.getImageData(0, 0, canvas.width, canvas.height).data;
+    const topology = sourcePixels && canvas
+      ? analyzePaletteTopology(sourcePixels, canvas.width, canvas.height, picks)
+      : {
+        counts: picks.map(() => 1),
+        opaquePixels: picks.length,
+        largestComponents: picks.map(() => 1),
+        componentCounts: picks.map(() => 1),
+      };
+    const stableLayerIndices = picks
+      .map((pick, index) => ({ pick, index }))
+      .filter(({ pick, index }) =>
+        pick.role === "layer" &&
+        topology.counts[index] > 0 &&
+        (topology.counts[index] / Math.max(1, topology.opaquePixels) >= 0.1 ||
+          topology.largestComponents[index] / topology.counts[index] >= 0.25))
+      .map(({ index }) => index);
+    const topologyFiltered = picks.filter((pick, index) => {
+      if (pick.role === "bg") return true;
+      if (topology.counts[index] === 0) return false;
+      const largestRatio = topology.largestComponents[index] / topology.counts[index];
+      if (largestRatio >= 0.25 || topology.counts[index] / Math.max(1, topology.opaquePixels) >= 0.1) return true;
+      return !stableLayerIndices.some((stableIndex) => {
+        const stable = picks[stableIndex];
+        return Math.hypot(
+          pick.rgb[0] - stable.rgb[0],
+          pick.rgb[1] - stable.rgb[1],
+          pick.rgb[2] - stable.rgb[2],
+        ) <= colorMergeThreshold * 2.5;
+      });
+    });
+    const weightedPicks = topologyFiltered.map((pick) => ({
+      pick,
+      count: topology.counts[picks.indexOf(pick)],
+    }));
+    const consolidated = consolidateSimilarColors(
+      weightedPicks.map(({ pick, count }) => ({ rgb: pick.rgb, count })),
+      colorMergeThreshold,
+    );
+    const effectivePicks = consolidated
+      .map(({ rgb, count }) => ({
+        pick: topologyFiltered.find((candidate) =>
+          candidate.rgb[0] === rgb[0] && candidate.rgb[1] === rgb[1] && candidate.rgb[2] === rgb[2])!,
+        count,
+      }))
+      .filter(({ pick, count }) => pick && (pick.role === "bg" || count > 0))
+      .map(({ pick }) => pick);
+    if (effectivePicks.length !== picks.length) {
+      setPicks(effectivePicks);
+      showToast(`Removed or merged ${picks.length - effectivePicks.length} transition layer(s) before vectorizing`);
+    }
+    const palette = effectivePicks.map((p) => p.rgb);
+    const layerPicks = effectivePicks.map((p, i) => ({ p, i })).filter(({ p }) => p.role === "layer");
     if (!layerPicks.length) { addLog("Pick at least one colour and mark it as a Layer"); return; }
     const pngB64 = await urlToB64(img.url);
     const capVal = Math.max(0.25, 2.0 / Math.max(1, scale / 2));
     const tolVal = Math.max(0.2, 1.0 / Math.max(1, scale / 2));
     const jobs: LayerJob[] = layerPicks.map(({ p, i }, k) => {
-      const detailed = p.profile === "detailed";
       return {
         jobId: k, name: `user-${i}`, engine: p.profile === "geometric" ? "smooth3" : "smooth2",
         useG1: p.profile === "geometric", file: "user.png", offset: [0, 0], palette, idx: i,
         cfg: p.profile === "geometric" ? [capVal, tolVal, true, 25.0, 25.0] : null, scale,
         quality: {
-          smoothingCap: detailed ? Math.min(smoothingCap, 0.75) : smoothingCap,
-          fitError: detailed ? Math.min(fitError, 0.12) : fitError,
-          cornerWindow: detailed ? Math.min(cornerWindow, 5) : cornerWindow,
-          cornerAngle: detailed ? Math.min(cornerAngle, 40) : cornerAngle,
-          tinyCurve: detailed ? Math.min(tinyCurve, 1) : tinyCurve,
+          smoothingCap,
+          fitError,
+          cornerWindow,
+          cornerAngle,
+          tinyCurve,
           minAreaFraction,
         },
-        refinement: { pass: 1, gapCloseRadius: 0, edgeSmoothing: 1 },
+        refinement: { pass: 1, gapCloseRadius: 0, edgeSmoothing: 1, source: "original-raster" },
         expected: null, fill: p.hex, id: p.name,
       };
     });
-    await execute(jobs, { "user.png": pngB64 }, `0 0 ${img.w * scale} ${img.h * scale}`);
+    await execute(jobs, { "user.png": pngB64 }, `0 0 ${img.w * scale} ${img.h * scale}`, effectivePicks);
   }, [
     img, picks, scale, execute, smoothingCap, fitError, cornerWindow, cornerAngle,
     tinyCurve, minAreaFraction,
   ]);
 
   const runRefinement = useCallback(async () => {
-    if (!img || activeJobs.length === 0 || running) return;
+    if (!img || !rawSvgContent || activeJobs.length === 0 || running) return;
     const nextPass = Math.min(3, refinementPass + 1);
-    const pngB64 = await urlToB64(img.url);
+    const pngB64 = await rasterizeSvgToB64(rawSvgContent, img.w, img.h);
     const jobs = activeJobs.map((job) => ({
       ...job,
       refinement: {
         pass: nextPass,
         gapCloseRadius,
         edgeSmoothing: refinementSmoothing,
+        source: "previous-svg" as const,
       },
     }));
     await execute(jobs, { [jobs[0].file]: pngB64 }, activeViewBox);
   }, [
-    img, activeJobs, activeViewBox, running, refinementPass, gapCloseRadius,
+    img, rawSvgContent, activeJobs, activeViewBox, running, refinementPass, gapCloseRadius,
     refinementSmoothing, execute,
   ]);
 
@@ -1348,7 +1491,7 @@ export default function Page() {
                         Edge refinement
                       </h3>
                       <p className="text-[9px] text-white/45">
-                        Pass {refinementPass} of 3, using the previous layer jobs and source mask.
+                        Pass {refinementPass} of 3, refining the previous SVG result.
                       </p>
                     </div>
                     <button
@@ -1551,11 +1694,17 @@ export default function Page() {
 
               {mode === "custom" && (
                 <button
-                  onClick={runCustom}
+                  onClick={results.length > 0 && refinementPass < 3 ? runRefinement : runCustom}
                   disabled={!canRunCustom}
                   className="w-full relative overflow-hidden rounded-xl bg-gradient-to-r from-[var(--accent)] to-[#fef08a] px-3 py-2 text-xs font-bold text-black shadow-[0_0_20px_rgba(212,175,55,0.3)] hover:shadow-[0_0_30px_rgba(212,175,55,0.5)] active:scale-[0.99] transition-all disabled:opacity-30 disabled:shadow-none"
                 >
-                  {running ? "Processing Layers..." : "Vectorize Image"}
+                  {running
+                    ? "Processing Layers..."
+                    : results.length > 0 && refinementPass < 3
+                      ? `Refine Edges: Pass ${refinementPass + 1}`
+                      : refinementPass >= 3
+                        ? "Rebuild From Source"
+                        : "Vectorize Image"}
                 </button>
               )}
             </section>
