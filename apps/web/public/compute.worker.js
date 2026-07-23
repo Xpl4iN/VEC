@@ -79,6 +79,15 @@ function processJob(job) {
   const identical = job.expected != null ? pathD === job.expected : null;
   if (identical === false)
     throw new Error(`byte-identity FAILED on '${name}' — regime 1 broken, do not ship`);
+  // Transition shades selected from antialiasing or gradients may legitimately
+  // produce no region above the contour threshold. Treat that as an empty
+  // layer instead of passing an empty string to the path cleanup contract.
+  if (!pathD.trim()) {
+    return {
+      name, d: "", nodes: 0,
+      iou: m.iou, mean: m.mean, identical, cleanup: [],
+    };
+  }
   pyodide.globals.set("_vec_d", pathD);
   const cleanup = JSON.parse(pyodide.runPython([
     "if not deloop.parse_is_trustworthy(_vec_d):",

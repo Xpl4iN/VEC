@@ -5,3 +5,4 @@ scikit-image==0.24.0
 pillow
 matplotlib          # verification oracle, test-only and not shipped
 pytest
+potracer==0.0.4
