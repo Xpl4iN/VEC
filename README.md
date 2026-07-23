@@ -51,8 +51,9 @@ npm run build
 
 ## Vercel deployment
 
-The root `vercel.json` configures Vercel to build the application in
-`apps/web`, even when the repository root is selected in the dashboard.
+The root `vercel.json` uses Vercel's framework-neutral preset to build the
+Next.js static export in `apps/web`, even when the repository root is selected
+in the dashboard. This avoids root-level Python and Next.js auto-detection.
 Alternatively, set the Vercel project Root Directory to `apps/web` and use
 the Next.js framework preset.
 
