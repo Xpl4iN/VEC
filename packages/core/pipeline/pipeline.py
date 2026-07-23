@@ -28,6 +28,7 @@ LAM, MU = 0.55, -0.58
 FIT_ERR = 0.25     # bezier fit tolerance, source px
 MIN_AREA = 2.0     # drop specks smaller than this, source px^2
 MIN_AREA_FRACTION = 0.00005  # adaptive floor for large uploaded artwork
+COVERAGE_MODE = "nearest"  # parity with the UI color-reduction preview
 
 # Layer definitions are injected by the caller at runtime.
 # name: (file, offset, palette, index-of-color-to-extract or None for alpha)
@@ -43,6 +44,15 @@ def coverage(name):
         return alpha, off
     C = a[..., :3]
     P = np.array(palette, float)                       # k x 3
+    if COVERAGE_MODE == "nearest":
+        best = np.zeros(alpha.shape, dtype=np.int16)
+        best_dist = np.full(alpha.shape, np.inf, dtype=np.float64)
+        for pi, color in enumerate(P):
+            dist = np.sum((C - color) ** 2, axis=2)
+            take = dist < best_dist
+            best[take] = pi
+            best_dist[take] = dist[take]
+        return alpha * (best == idx), off
     # barycentric weights: minimise |P^T w - C| s.t. sum w = 1  (soft constraint)
     W = 1000.0
     M = np.vstack([P.T, np.full((1, len(P)), W)])      # 4 x k

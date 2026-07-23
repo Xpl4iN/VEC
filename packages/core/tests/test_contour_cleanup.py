@@ -1,8 +1,10 @@
 """Regression tests for adaptive raster-layer cleanup before curve fitting."""
 import pathlib
 import sys
+import tempfile
 
 import numpy as np
+from PIL import Image
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "packages" / "core" / "pipeline"))
@@ -31,3 +33,24 @@ def test_adaptive_cleanup_preserves_meaningful_small_regions():
     cleaned, _ = P.clean_contour_field(field)
 
     assert cleaned[55, 55] == 1.0
+
+
+def test_nearest_palette_coverage_keeps_intermediate_shade_as_solid_layer():
+    pixels = np.array([[
+        [65, 220, 0, 255],
+        [70, 170, 15, 255],
+        [75, 120, 30, 255],
+    ]], dtype=np.uint8)
+    palette = [[65, 220, 0], [70, 170, 15], [75, 120, 30]]
+
+    with tempfile.TemporaryDirectory() as directory:
+        source = pathlib.Path(directory) / "palette.png"
+        Image.fromarray(pixels, "RGBA").save(source)
+        P.LAYERS["middle"] = (str(source), [0, 0], palette, 1)
+        try:
+            field, offset = P.coverage("middle")
+        finally:
+            del P.LAYERS["middle"]
+
+    assert offset == [0, 0]
+    assert field.tolist() == [[0.0, 1.0, 0.0]]

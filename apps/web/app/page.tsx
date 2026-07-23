@@ -34,6 +34,7 @@ const PIPELINE_MODULES = ["pipeline", "smooth2", "smooth3", "regular", "emit", "
 type Pick = { rgb: [number, number, number]; hex: string; role: "layer" | "bg"; name: string; profile: Profile };
 type Mode = "idle" | "custom";
 type StageBg = "dark" | "light" | "black" | "checker";
+type SourceSnapshot = { name: string; type: string; size: number; dataUrl: string };
 
 interface Step {
   id: string;
@@ -73,6 +74,8 @@ export default function Page() {
   const [svgUrl, setSvgUrl] = useState<string | null>(null);
   const [rawSvgContent, setRawSvgContent] = useState<string | null>(null);
   const [reportUrl, setReportUrl] = useState<string | null>(null);
+  const [sessionExportUrl, setSessionExportUrl] = useState<string | null>(null);
+  const [sourceSnapshot, setSourceSnapshot] = useState<SourceSnapshot | null>(null);
   const [scale, setScale] = useState<number>(2);
   const [activeJobs, setActiveJobs] = useState<LayerJob[]>([]);
   const [activeViewBox, setActiveViewBox] = useState<string>("0 0 100 100");
@@ -146,6 +149,7 @@ export default function Page() {
     setSvgUrl(null);
     setRawSvgContent(null);
     setReportUrl(null);
+    setSessionExportUrl(null);
     setLog([]);
     setActiveJobs([]);
     setCopied(false);
@@ -440,6 +444,12 @@ export default function Page() {
 
   const onFile = useCallback(async (file: File) => {
     reset(); setPicks([]); setArcWarning(false); setSvgVectors([]); setSvgOrigin([0, 0]); setSvgNote(null);
+    setSourceSnapshot({
+      name: file.name,
+      type: file.type || "application/octet-stream",
+      size: file.size,
+      dataUrl: `data:${file.type || "application/octet-stream"};base64,${await fileToB64(file)}`,
+    });
     const isSvg = file.name.toLowerCase().endsWith(".svg");
 
     if (isSvg) {
@@ -636,6 +646,43 @@ export default function Page() {
         })),
       };
       setReportUrl(URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" })));
+      const sessionExport = {
+        schemaVersion: 1,
+        generatedAt: new Date().toISOString(),
+        source: sourceSnapshot ? {
+          ...sourceSnapshot,
+          width: img?.w ?? null,
+          height: img?.h ?? null,
+          isSvg: img?.isSvg ?? false,
+        } : null,
+        parsed: {
+          svgNote,
+          svgOrigin,
+          passthroughVectors: svgVectors,
+        },
+        settings: {
+          scale,
+          includeBackground: includeBg,
+          backgroundColor: bgHex,
+          stageBackground: stageBg,
+          requestedColorCount: kColorsCount,
+          colorMergeThreshold,
+          colorPreviewEnabled: showQuantizedPreview,
+          coverageMode: "nearest",
+        },
+        palette: picks.map((pick, index) => ({
+          index,
+          ...pick,
+          coveragePercent: layerCoverages[pick.hex] ?? null,
+        })),
+        jobs,
+        pipeline: report,
+        output: { viewBox, svg },
+      };
+      setSessionExportUrl(URL.createObjectURL(new Blob(
+        [JSON.stringify(sessionExport, null, 2)],
+        { type: "application/json" },
+      )));
 
       updateStepStatus("assemble", "completed", `SVG ready (${wall}s wall time)`);
       addLog(`Execution completed: ${res.length} layers in ${wall}s across ${size} workers`);
@@ -659,7 +706,10 @@ export default function Page() {
     } finally {
       pool.terminate(); setRunning(false);
     }
-  }, [includeBg, bgHex, svgVectors, svgOrigin, scale]);
+  }, [
+    includeBg, bgHex, svgVectors, svgOrigin, svgNote, scale, sourceSnapshot, img,
+    stageBg, kColorsCount, colorMergeThreshold, showQuantizedPreview, picks, layerCoverages,
+  ]);
 
   useEffect(() => {
     if (activeJobs.length > 0 && results.length === activeJobs.length) {
@@ -1342,6 +1392,16 @@ export default function Page() {
                     JSON
                   </a>
                 )}
+                {sessionExportUrl && (
+                  <a
+                    href={sessionExportUrl}
+                    download="vectorizer-session.json"
+                    className="rounded-lg border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-2.5 py-1.5 text-xs font-medium text-[var(--accent)] hover:bg-[var(--accent)]/20 transition-colors"
+                    title="Export source payload, selected colors, settings, jobs, metrics, cleanup diagnostics, and generated SVG"
+                  >
+                    Session Export
+                  </a>
+                )}
               </div>
             </section>
           )}
@@ -1470,7 +1530,10 @@ export default function Page() {
           >
 
             {/* Original Raster Artwork (Before) with Pixel-Aligned Quantized Pre-step Canvas */}
-            <div className={`absolute inset-12 flex items-center justify-center transition-all duration-700 ${running ? 'blur-sm opacity-40 grayscale-[30%]' : 'opacity-100'}`}>
+            <div
+              className={`absolute inset-12 flex items-center justify-center overflow-hidden ${isAnimatingReveal ? 'transition-all duration-700 ease-in-out' : 'transition-none'} ${running ? 'blur-sm opacity-40 grayscale-[30%]' : 'opacity-100'}`}
+              style={results.length > 0 ? { clipPath: `inset(0 ${100 - sliderPos}% 0 0)` } : undefined}
+            >
               {showQuantizedPreview ? (
                 <canvas
                   ref={quantizedCanvasRef}
