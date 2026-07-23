@@ -1492,10 +1492,20 @@ export default function Page() {
             {/* Rendered SVG Vector Output (After) with Clip Path for Slider */}
             {activeJobs.length > 0 && (
               <div
-                className={`absolute inset-12 flex items-center justify-center ${isAnimatingReveal ? 'transition-all duration-700 ease-in-out' : 'transition-none'}`}
+                className={`absolute inset-12 flex items-center justify-center overflow-hidden ${isAnimatingReveal ? 'transition-all duration-700 ease-in-out' : 'transition-none'}`}
                 style={{ clipPath: `inset(0 0 0 ${sliderPos}%)` }}
               >
-                {renderProgressiveSvg()}
+                {/* Opaque stage surface prevents transparent SVG regions from
+                    revealing the raster underneath. At sliderPos=0 this is a
+                    genuinely pure vector preview on the selected stage. */}
+                <div className={`absolute inset-0 ${stageBg === "dark" ? "bg-grid-dark" :
+                  stageBg === "light" ? "bg-slate-100" :
+                    stageBg === "checker" ? "bg-checkerboard" :
+                      "bg-black"
+                  }`} />
+                <div className="relative z-10 w-full h-full flex items-center justify-center">
+                  {renderProgressiveSvg()}
+                </div>
               </div>
             )}
 

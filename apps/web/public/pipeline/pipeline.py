@@ -14,7 +14,7 @@ Pipeline per layer:
 import sys, json, math
 import numpy as np
 from PIL import Image
-from scipy.ndimage import zoom
+from scipy.ndimage import label, zoom
 from scipy.spatial import cKDTree
 from skimage.measure import find_contours
 
@@ -29,6 +29,7 @@ ITERS = 600    # Taubin iterations
 LAM, MU = 0.55, -0.58
 FIT_ERR = 0.25     # bezier fit tolerance, source px
 MIN_AREA = 2.0     # drop specks smaller than this, source px^2
+MIN_AREA_FRACTION = 0.00005  # adaptive floor for large uploaded artwork
 
 # Layer definitions are injected by the caller at runtime.
 # name: (file, offset, palette, index-of-color-to-extract or None for alpha)
@@ -57,8 +58,35 @@ def coverage(name):
 
 
 # ---------------------------------------------------------------- contours
+def clean_contour_field(field):
+    """Remove tiny islands and fill tiny holes before curve fitting."""
+    cleaned = field.copy()
+    min_pixels = max(int(MIN_AREA), int(round(field.size * MIN_AREA_FRACTION)))
+    mask = cleaned >= 0.5
+    components, count = label(mask)
+    if count:
+        sizes = np.bincount(components.ravel())
+        remove = sizes < min_pixels
+        remove[0] = False
+        cleaned[remove[components]] = 0.0
+
+    mask = cleaned >= 0.5
+    holes, count = label(~mask)
+    if count:
+        sizes = np.bincount(holes.ravel())
+        border_ids = np.unique(np.concatenate([
+            holes[0, :], holes[-1, :], holes[:, 0], holes[:, -1],
+        ]))
+        fill = sizes < min_pixels
+        fill[border_ids] = False
+        fill[0] = False
+        cleaned[fill[holes]] = 1.0
+    return cleaned, float(min_pixels)
+
+
 def contours_of(field):
     pad = 3
+    field, min_area = clean_contour_field(field)
     f = np.pad(field, pad, mode="constant")
     # Upsample by Z, but cap the grid so large uploads do not exhaust browser
     # memory. The effective factor never exceeds Z.
@@ -72,7 +100,7 @@ def contours_of(field):
             continue
         x, y = pts[:, 0], pts[:, 1]
         area = 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
-        if area < MIN_AREA:
+        if area < min_area:
             continue
         if np.hypot(*(pts[0] - pts[-1])) < 1e-6:
             pts = pts[:-1]
