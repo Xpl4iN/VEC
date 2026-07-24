@@ -1,14 +1,20 @@
 // Assemble the final SVG from per-layer path data (emitted at 2× source px by the
 // pipeline's beziers_to_d scale=2.0). Layers are drawn in the given stacking order.
 //
-// The genuine-vector passthrough (SVG inputs) uses the PROVISIONAL regex scaler,
-// safe ONLY for M/L/H/V/C/Q/T/Z — arc (A) commands would be corrupted. Flagged in
-// the UI; the real parser (Gate D) replaces it. See SPEC gotcha 2.
+// Genuine-vector SVG inputs are parsed through the arc-safe Stage 0 path.
 
 export type AssembledLayer = {
   id: string;
   fill: string;
   d: string;
+  stroke?: string;
+  strokeWidth?: string;
+  strokeLinecap?: string;
+  strokeLinejoin?: string;
+  strokeMiterlimit?: string;
+  strokeOpacity?: string;
+  fillOpacity?: string;
+  opacity?: string;
   editableComponents?: boolean;
 };
 export type ComponentStacking = "palette" | "large-first";
@@ -155,6 +161,7 @@ export function assembleLayers(
   viewBox: string,
   bgFill?: string | null,
   stacking: ComponentStacking = "palette",
+  paintDefs = "",
 ): string {
   const parts = viewBox.trim().split(/\s+/);
   const w = parts[2] ?? "100";
@@ -165,7 +172,7 @@ export function assembleLayers(
       const components = layer.editableComponents ? splitEditableComponents(layer.d) : [layer.d];
       return components.map((d, index) => {
         const id = components.length === 1 ? layer.id : `${layer.id}-${index + 1}`;
-        return { id, fill: layer.fill, d, area: componentArea(d), layerIndex, componentIndex: index };
+        return { ...layer, id, d, area: componentArea(d), layerIndex, componentIndex: index };
       });
     });
   if (stacking === "large-first") {
@@ -173,11 +180,26 @@ export function assembleLayers(
       b.area - a.area || a.layerIndex - b.layerIndex || a.componentIndex - b.componentIndex);
   }
   const paths = components
-    .map(({ id, fill, d }) =>
-      `    <path id="${escapeAttr(id)}" fill="${escapeAttr(fill)}" fill-rule="evenodd" d="${d}"/>`)
+    .map(({ id, fill, d, stroke, strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit, strokeOpacity, fillOpacity, opacity }) => {
+      const presentation = [
+        `fill="${escapeAttr(fill)}"`,
+        `fill-rule="evenodd"`,
+        stroke && `stroke="${escapeAttr(stroke)}"`,
+        strokeWidth && `stroke-width="${escapeAttr(strokeWidth)}"`,
+        strokeLinecap && `stroke-linecap="${escapeAttr(strokeLinecap)}"`,
+        strokeLinejoin && `stroke-linejoin="${escapeAttr(strokeLinejoin)}"`,
+        strokeMiterlimit && `stroke-miterlimit="${escapeAttr(strokeMiterlimit)}"`,
+        strokeOpacity && strokeOpacity !== "1" && `stroke-opacity="${escapeAttr(strokeOpacity)}"`,
+        fillOpacity && fillOpacity !== "1" && `fill-opacity="${escapeAttr(fillOpacity)}"`,
+        opacity && opacity !== "1" && `opacity="${escapeAttr(opacity)}"`,
+      ].filter(Boolean).join(" ");
+      return `    <path id="${escapeAttr(id)}" ${presentation} d="${d}"/>`;
+    })
     .join("\n");
+  const defs = paintDefs ? `  <defs>${paintDefs}</defs>` : "";
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" width="${w}" height="${h}">`,
+    defs,
     `  <g id="artwork">`,
     bgRect ? bgRect + paths : paths,
     `  </g>`,

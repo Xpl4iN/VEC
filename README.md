@@ -13,10 +13,12 @@ editable SVG. Processing runs locally in the browser through Pyodide.
 - Per-layer Smooth, Faithful, and Geometric vectorization profiles
 - Advanced controls for smoothing, curve precision, corner detection, tiny-curve cleanup, and minimum detail area
 - Optional second and third refinement passes driven by the previous SVG, with source-mask gap closing and controlled edge refitting
+- Intuitive Straight, Curved, and Rounded edge-character choices for refinement passes, backed by line snapping, organic spline fitting, or circular-arc regularization
+- Guided Source, Colors, Shape, and Export workflow with a live full-stage progress overlay and optional technical diagnostics
 - Configurable palette-order or size-aware component stacking
 - Stroke-free SVG export with disconnected accents split into editor-selectable objects
 - Hole-aware component grouping so counters remain transparent
-- Pure-vector SVG passthrough without starting the compute runtime
+- Pure-vector SVG passthrough preserves paths and basic shapes, inherited fills, strokes, gradient paint definitions, round caps and joins, and rounded rectangles without starting the compute runtime
 - Self-intersection detection and cleanup for generated cubic paths
 - Browser-based parallel processing with no upload service
 - Persistent four-worker Pyodide pool reused across uploads and refinement passes

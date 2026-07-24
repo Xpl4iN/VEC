@@ -3,7 +3,7 @@
 import { useCallback, useRef, useState, useEffect } from "react";
 import { assembleLayers, type AssembledLayer, type ComponentStacking } from "@/lib/assemble";
 import { consolidateSimilarColors } from "@/lib/palette";
-import { parseSvgInput, compositeRasters, scalePathData, type VectorPath } from "@/lib/svgInput";
+import { parseSvgInput, compositeRasters, scalePaintDefs, scalePathData, scaleStrokeWidth, type VectorPath } from "@/lib/svgInput";
 import { ComputePool, choosePoolSize, type PoolEvents } from "@/lib/pool";
 import type { LayerJob, LayerResult, Profile } from "@/lib/types";
 
@@ -35,6 +35,7 @@ const PIPELINE_MODULES = ["pipeline", "smooth2", "smooth3", "regular", "emit", "
 type Pick = { rgb: [number, number, number]; hex: string; role: "layer" | "bg"; name: string; profile: Profile };
 type Mode = "idle" | "custom";
 type StageBg = "dark" | "light" | "black" | "checker";
+type EdgeCharacter = "straight" | "curved" | "rounded";
 type SourceSnapshot = { name: string; type: string; size: number; dataUrl: string };
 type QualityPreset = "balanced" | "illustrated" | "faithful" | "geometric";
 
@@ -242,6 +243,9 @@ export default function Page() {
   const [refinementPass, setRefinementPass] = useState(1);
   const [gapCloseRadius, setGapCloseRadius] = useState(1);
   const [refinementSmoothing, setRefinementSmoothing] = useState(1.15);
+  const [edgeCharacter, setEdgeCharacter] = useState<EdgeCharacter>("curved");
+  const [completedLayerCount, setCompletedLayerCount] = useState(0);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [activeJobs, setActiveJobs] = useState<LayerJob[]>([]);
   const [activeViewBox, setActiveViewBox] = useState<string>("0 0 100 100");
   const [copied, setCopied] = useState(false);
@@ -264,6 +268,7 @@ export default function Page() {
 
   // SVG input: genuine vector paths passed through to the export (arc-safe scaled)
   const [svgVectors, setSvgVectors] = useState<VectorPath[]>([]);
+  const [svgPaintDefs, setSvgPaintDefs] = useState("");
   const [svgOrigin, setSvgOrigin] = useState<[number, number]>([0, 0]);
   const [svgNote, setSvgNote] = useState<string | null>(null);
 
@@ -628,7 +633,7 @@ export default function Page() {
   };
 
   const onFile = useCallback(async (file: File) => {
-    reset(); setPicks([]); setArcWarning(false); setSvgVectors([]); setSvgOrigin([0, 0]); setSvgNote(null);
+    reset(); setPicks([]); setArcWarning(false); setSvgVectors([]); setSvgPaintDefs(""); setSvgOrigin([0, 0]); setSvgNote(null);
     setSourceSnapshot({
       name: file.name,
       type: file.type || "application/octet-stream",
@@ -646,20 +651,23 @@ export default function Page() {
       catch (e) { addLog("SVG parse failed: " + String(e)); setImg(null); setMode("idle"); return; }
 
       setSvgVectors(parsed.vectors);
+      setSvgPaintDefs(parsed.paintDefs);
       setSvgOrigin([parsed.viewBox[0], parsed.viewBox[1]]);
       const notes = [`${parsed.rasters.length} embedded raster(s), ${parsed.vectors.length} vector path(s) (passed through)`];
       if (parsed.fullCanvasRects.length) notes.push(`${parsed.fullCanvasRects.length} full-canvas rect(s) dropped`);
-      if (parsed.unsupported.length) notes.push(`ignored: ${parsed.unsupported.join(", ")}`);
+      if (parsed.unsupported.length) notes.push(`unsupported and omitted: ${parsed.unsupported.join(", ")}`);
       setSvgNote(notes.join(" · ")); addLog("SVG: " + notes.join(" · "));
 
       if (parsed.rasters.length === 0) {
         // Pure vector: there are no worker jobs, so finalize passthrough here.
         const viewBox = `0 0 ${parsed.width * scale} ${parsed.height * scale}`;
         const passthrough = parsed.vectors.map((v, i) => ({
-          id: `lettering-${i}`, fill: v.fill,
+          id: `lettering-${i}`, ...v,
+          strokeWidth: scaleStrokeWidth(v.strokeWidth, scale),
           d: scalePathData(v.d, scale, -parsed.viewBox[0], -parsed.viewBox[1]),
         }));
-        const svg = assembleLayers(passthrough, viewBox, includeBg ? bgHex : null, componentStacking);
+        const svg = assembleLayers(passthrough, viewBox, includeBg ? bgHex : null, componentStacking,
+          scalePaintDefs(parsed.paintDefs, scale, -parsed.viewBox[0], -parsed.viewBox[1]));
         setImg({ url: URL.createObjectURL(file), w: parsed.width, h: parsed.height, isSvg: true });
         setActiveViewBox(viewBox);
         setRawSvgContent(svg);
@@ -780,7 +788,14 @@ export default function Page() {
     paletteSnapshot: Pick[] = picks,
   ) => {
     const pass = jobs[0]?.refinement?.pass ?? 1;
-    setRunning(true); reset(); setRefinementPass(pass); setActiveJobs(jobs); setActiveViewBox(viewBox); setSliderPos(0); setIsAnimatingReveal(false);
+    reset();
+    setRunning(true);
+    setRefinementPass(pass);
+    setActiveJobs(jobs);
+    setActiveViewBox(viewBox);
+    setCompletedLayerCount(0);
+    setSliderPos(0);
+    setIsAnimatingReveal(false);
     const size = choosePoolSize(jobs.length);
     setPoolSize(size);
 
@@ -795,6 +810,7 @@ export default function Page() {
       },
       onLayer: (r) => {
         setResults((rs) => [...rs, r]);
+        setCompletedLayerCount((count) => count + 1);
         updateStepStatus("compute", "running", `Computed layer ${r.name} (${r.nodes} nodes)`);
       }
     };
@@ -831,10 +847,12 @@ export default function Page() {
           return r ? [{ id: j.id, fill: j.fill, d: r.d ?? "", editableComponents: true }] : [];
         });
       const passthrough: AssembledLayer[] = svgVectors.map((v, i) => ({
-        id: `lettering-${i}`, fill: v.fill,
+        id: `lettering-${i}`, ...v,
+        strokeWidth: scaleStrokeWidth(v.strokeWidth, scale),
         d: scalePathData(v.d, scale, -svgOrigin[0], -svgOrigin[1]),
       }));
-      const svg = assembleLayers([...ordered, ...passthrough], viewBox, includeBg ? bgHex : null, componentStacking);
+      const svg = assembleLayers([...ordered, ...passthrough], viewBox, includeBg ? bgHex : null, componentStacking,
+        scalePaintDefs(svgPaintDefs, scale, -svgOrigin[0], -svgOrigin[1]));
       setRawSvgContent(svg);
       setSvgUrl(URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" })));
 
@@ -844,6 +862,7 @@ export default function Page() {
           pass: jobs[0]?.refinement?.pass ?? 1,
           gapCloseRadius: jobs[0]?.refinement?.gapCloseRadius ?? 0,
           edgeSmoothing: jobs[0]?.refinement?.edgeSmoothing ?? 1,
+          edgeCharacter: jobs[0]?.refinement?.edgeCharacter ?? "curved",
           source: jobs[0]?.refinement?.source ?? "original-raster",
         },
         layers: res.map((r) => ({
@@ -889,6 +908,7 @@ export default function Page() {
             pass: jobs[0]?.refinement?.pass ?? 1,
             gapCloseRadius: jobs[0]?.refinement?.gapCloseRadius ?? 0,
             edgeSmoothing: jobs[0]?.refinement?.edgeSmoothing ?? 1,
+            edgeCharacter: jobs[0]?.refinement?.edgeCharacter ?? "curved",
             source: jobs[0]?.refinement?.source ?? "original-raster",
           },
         },
@@ -931,7 +951,7 @@ export default function Page() {
       setRunning(false);
     }
   }, [
-    includeBg, bgHex, svgVectors, svgOrigin, svgNote, scale, sourceSnapshot, img,
+    includeBg, bgHex, svgVectors, svgPaintDefs, svgOrigin, svgNote, scale, sourceSnapshot, img,
     stageBg, kColorsCount, colorMergeThreshold, showQuantizedPreview, picks, layerCoverages,
     qualityPreset, componentStacking, smoothingCap, fitError, cornerWindow, cornerAngle,
     tinyCurve, minAreaFraction,
@@ -945,28 +965,32 @@ export default function Page() {
           return r ? [{ id: j.id, fill: j.fill, d: r.d ?? "", editableComponents: true }] : [];
         });
       const passthrough: AssembledLayer[] = svgVectors.map((v, i) => ({
-        id: `lettering-${i}`, fill: v.fill,
+        id: `lettering-${i}`, ...v,
+        strokeWidth: scaleStrokeWidth(v.strokeWidth, scale),
         d: scalePathData(v.d, scale, -svgOrigin[0], -svgOrigin[1]),
       }));
-      const svg = assembleLayers([...ordered, ...passthrough], activeViewBox, includeBg ? bgHex : null, componentStacking);
+      const svg = assembleLayers([...ordered, ...passthrough], activeViewBox, includeBg ? bgHex : null, componentStacking,
+        scalePaintDefs(svgPaintDefs, scale, -svgOrigin[0], -svgOrigin[1]));
       setRawSvgContent(svg);
       setSvgUrl(URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" })));
     }
-  }, [includeBg, bgHex, results, activeJobs, activeViewBox, svgVectors, svgOrigin, scale, componentStacking]);
+  }, [includeBg, bgHex, results, activeJobs, activeViewBox, svgVectors, svgPaintDefs, svgOrigin, scale, componentStacking]);
 
   useEffect(() => {
     if (activeJobs.length === 0 && svgVectors.length > 0 && img?.isSvg) {
       const viewBox = `0 0 ${img.w * scale} ${img.h * scale}`;
       const passthrough = svgVectors.map((v, i) => ({
-        id: `lettering-${i}`, fill: v.fill,
+        id: `lettering-${i}`, ...v,
+        strokeWidth: scaleStrokeWidth(v.strokeWidth, scale),
         d: scalePathData(v.d, scale, -svgOrigin[0], -svgOrigin[1]),
       }));
-      const svg = assembleLayers(passthrough, viewBox, includeBg ? bgHex : null, componentStacking);
+      const svg = assembleLayers(passthrough, viewBox, includeBg ? bgHex : null, componentStacking,
+        scalePaintDefs(svgPaintDefs, scale, -svgOrigin[0], -svgOrigin[1]));
       setActiveViewBox(viewBox);
       setRawSvgContent(svg);
       setSvgUrl(URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" })));
     }
-  }, [activeJobs.length, svgVectors, svgOrigin, img, scale, includeBg, bgHex, componentStacking]);
+  }, [activeJobs.length, svgVectors, svgPaintDefs, svgOrigin, img, scale, includeBg, bgHex, componentStacking]);
 
   const runCustom = useCallback(async () => {
     if (!img) return;
@@ -1055,19 +1079,44 @@ export default function Page() {
     if (!img || !rawSvgContent || activeJobs.length === 0 || running) return;
     const nextPass = Math.min(3, refinementPass + 1);
     const pngB64 = await rasterizeSvgToB64(rawSvgContent, img.w, img.h);
-    const jobs = activeJobs.map((job) => ({
-      ...job,
-      refinement: {
-        pass: nextPass,
-        gapCloseRadius,
-        edgeSmoothing: refinementSmoothing,
-        source: "previous-svg" as const,
-      },
-    }));
+    const jobs = activeJobs.map((job) => {
+      const quality = { ...(job.quality ?? {
+        smoothingCap, fitError, cornerWindow, cornerAngle, tinyCurve, minAreaFraction,
+      }) };
+      const cap = Math.max(0.5, quality.smoothingCap * refinementSmoothing);
+      const tolerance = Math.max(0.25, quality.fitError * 3);
+      if (edgeCharacter === "straight") {
+        quality.cornerAngle = Math.min(45, quality.cornerAngle);
+        quality.tinyCurve = Math.max(3, quality.tinyCurve);
+      } else if (edgeCharacter === "rounded") {
+        quality.cornerWindow = Math.max(10, quality.cornerWindow);
+        quality.cornerAngle = 120;
+        quality.tinyCurve = Math.max(3, quality.tinyCurve);
+      }
+      return {
+        ...job,
+        engine: edgeCharacter === "curved" ? "smooth2" as const : "smooth3" as const,
+        useG1: edgeCharacter !== "curved",
+        cfg: edgeCharacter === "curved"
+          ? null
+          : edgeCharacter === "straight"
+            ? [cap, tolerance, false, 8, 1e9] as LayerJob["cfg"]
+            : [cap, tolerance, true, 10, 8] as LayerJob["cfg"],
+        quality,
+        refinement: {
+          pass: nextPass,
+          gapCloseRadius,
+          edgeSmoothing: refinementSmoothing,
+          edgeCharacter,
+          source: "previous-svg" as const,
+        },
+      };
+    });
     await execute(jobs, { [jobs[0].file]: pngB64 }, activeViewBox);
   }, [
     img, rawSvgContent, activeJobs, activeViewBox, running, refinementPass, gapCloseRadius,
-    refinementSmoothing, execute,
+    refinementSmoothing, edgeCharacter, smoothingCap, fitError, cornerWindow, cornerAngle,
+    tinyCurve, minAreaFraction, execute,
   ]);
 
   const onStageImageClick = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
@@ -1098,6 +1147,16 @@ export default function Page() {
   };
 
   const canRunCustom = mode === "custom" && picks.some((p) => p.role === "layer") && !running;
+  const currentPipelineStep = steps.find((step) => step.status === "running")
+    ?? steps.find((step) => step.status === "error")
+    ?? steps[0];
+  const completedPipelineSteps = steps.filter((step) => step.status === "completed").length;
+  const computeShare = currentPipelineStep.id === "compute" && activeJobs.length
+    ? completedLayerCount / activeJobs.length
+    : 0;
+  const pipelineProgress = Math.min(100, Math.round(
+    ((completedPipelineSteps + computeShare * 0.9) / steps.length) * 100,
+  ));
   const isGeometric = picks.some(p => p.profile === 'geometric');
 
   // Slider Mouse/Touch Handlers
@@ -1135,22 +1194,22 @@ export default function Page() {
   return (
     <div className="flex h-screen w-full overflow-hidden text-[var(--text)] select-none bg-[var(--bg)] font-sans">
 
-      {/* ---------------- LEFT PANE: Control Panel (38% / min 440px max 560px) ---------------- */}
-      <div className="w-[38%] min-w-[440px] max-w-[560px] flex flex-col border-r border-[var(--panel-border)] bg-[var(--panel)] backdrop-blur-xl z-20 shadow-2xl overflow-y-auto">
+      {/* ---------------- LEFT PANE: Guided Workflow ---------------- */}
+      <aside className="w-[36%] min-w-[420px] max-w-[540px] flex flex-col border-r border-white/8 bg-gradient-to-b from-[#121318] to-[#0c0d10] z-20 shadow-2xl overflow-y-auto">
 
         {/* Header Branding */}
-        <header className="p-4 pb-3 border-b border-white/5 flex items-center justify-between shrink-0">
+        <header className="sticky top-0 z-30 border-b border-white/8 bg-[#121318]/95 px-4 py-3 backdrop-blur-xl flex items-center justify-between shrink-0">
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-[#d4af37] via-[#fef08a] to-[#d4af37]">
-                Vectorizer
+              <h1 className="text-xl font-bold tracking-tight text-white">
+                Vectec
               </h1>
               <span className="text-[10px] uppercase font-mono tracking-widest px-2 py-0.5 rounded-full bg-[var(--accent-glow)] border border-[var(--accent)]/40 text-[var(--accent)]">
                 v1.0
               </span>
             </div>
             <p className="mt-0.5 text-[11px] text-[var(--muted)] leading-tight">
-              In-Browser Pyodide Pool. Quality beats speed.
+              Shape clean, editable vectors on your device.
             </p>
           </div>
           {running && (
@@ -1161,12 +1220,50 @@ export default function Page() {
           )}
         </header>
 
-        <div className="flex-1 p-4 space-y-3.5">
+        <nav className="sticky top-[65px] z-20 grid grid-cols-4 gap-1 border-b border-white/8 bg-[#101116]/95 px-3 py-2 backdrop-blur-xl">
+          {[
+            ["1", "Source", Boolean(img)],
+            ["2", "Colors", picks.some((pick) => pick.role === "layer")],
+            ["3", "Shape", results.length > 0],
+            ["4", "Export", Boolean(rawSvgContent)],
+          ].map(([number, label, complete], index) => {
+            const activeIndex = rawSvgContent
+              ? 3
+              : !img
+                ? 0
+                : !picks.some((pick) => pick.role === "layer")
+                  ? 1
+                  : 2;
+            const active = index === activeIndex;
+            return (
+              <div
+                key={label as string}
+                className={`rounded-lg px-2 py-1.5 transition-colors ${
+                  active ? "bg-[var(--accent)]/12 text-[var(--accent)]" : "text-white/35"
+                }`}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className={`flex h-4 w-4 items-center justify-center rounded-full text-[8px] font-bold ${
+                    complete ? "bg-emerald-400/15 text-emerald-300" : active ? "bg-[var(--accent)] text-black" : "bg-white/6"
+                  }`}>
+                    {complete ? "✓" : number as string}
+                  </span>
+                  <span className="text-[9px] font-semibold uppercase tracking-wide">{label as string}</span>
+                </div>
+              </div>
+            );
+          })}
+        </nav>
+
+        <div className="flex-1 p-3 space-y-3">
 
           {/* Upload Dropzone */}
-          <section className="space-y-1.5">
+          <section className="rounded-2xl border border-white/8 bg-white/[0.025] p-3 space-y-2">
             <div className="flex justify-between items-center text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-              <span>Source Artwork</span>
+              <span className="flex items-center gap-2 text-white/75">
+                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-white/6 text-[9px] text-[var(--accent)]">1</span>
+                Source artwork
+              </span>
               <span className="text-[10px] text-white/40 font-normal">PNG, WEBP, SVG</span>
             </div>
             <div
@@ -1210,7 +1307,14 @@ export default function Page() {
 
           {/* Palette Inspector Canvas & Sampler */}
           {img && (
-            <section className="space-y-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
+            <section className="rounded-2xl border border-white/8 bg-white/[0.025] p-3 space-y-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
+              <div className="flex items-center justify-between">
+                <h2 className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-white/75">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-md bg-white/6 text-[9px] text-[var(--accent)]">2</span>
+                  Colors
+                </h2>
+                <span className="text-[9px] text-white/35">Reduce, sample, then edit</span>
+              </div>
               {/* Color Reduction (K-Means Posterization) Box */}
               <div className="rounded-xl bg-black/40 border border-[var(--panel-border)] p-3 space-y-2.5 shadow-inner">
                 <div className="flex items-center justify-between">
@@ -1373,10 +1477,13 @@ export default function Page() {
 
           {/* Layers List & Configuration */}
           {(mode === "custom" || picks.length > 0) && (
-            <section className="space-y-2">
+            <section className="rounded-2xl border border-white/8 bg-white/[0.025] p-3 space-y-2">
               <div className="flex items-center justify-between">
                 <h2 className="text-[11px] text-[var(--muted)] uppercase tracking-wider font-semibold flex items-center gap-1.5">
-                  <span>Layers</span>
+                  <span className="flex items-center gap-2 text-white/75">
+                    <span className="flex h-5 w-5 items-center justify-center rounded-md bg-white/6 text-[9px] text-[var(--accent)]">3</span>
+                    Shape and layers
+                  </span>
                   <span className="px-1.5 py-0.5 rounded-full bg-white/10 text-[10px] text-white font-mono">{picks.length}</span>
                 </h2>
                 {picks.length > 1 && (
@@ -1503,6 +1610,37 @@ export default function Page() {
                       {refinementPass >= 3 ? "Pass 3 complete" : `Run pass ${refinementPass + 1}`}
                     </button>
                   </div>
+                  <div className="space-y-1.5">
+                    <span className="text-[9px] font-semibold uppercase tracking-wider text-white/60">
+                      Edge character
+                    </span>
+                    <div className="grid grid-cols-3 gap-1">
+                      {([
+                        ["straight", "Straight", "Exact lines, crisp corners"],
+                        ["curved", "Curved", "Clean flowing curves"],
+                        ["rounded", "Rounded", "Circular arcs, softer corners"],
+                      ] as const).map(([value, label, description]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setEdgeCharacter(value)}
+                          title={description}
+                          className={`rounded-lg border px-1.5 py-2 text-center transition-all ${
+                            edgeCharacter === value
+                              ? "border-[var(--accent)] bg-[var(--accent)] text-black"
+                              : "border-white/10 bg-black/30 text-white/65 hover:border-white/25"
+                          }`}
+                        >
+                          <span className="block text-[10px] font-bold">{label}</span>
+                          <span className={`mt-0.5 block text-[8px] leading-tight ${
+                            edgeCharacter === value ? "text-black/65" : "text-white/35"
+                          }`}>
+                            {description}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <label className="block space-y-1">
                     <span className="flex justify-between text-[9px] text-white/60">
                       <span>Close small gaps</span>
@@ -1534,7 +1672,7 @@ export default function Page() {
                     />
                   </label>
                   <p className="text-[9px] text-white/35 leading-tight">
-                    Gap closing is applied before contour fitting. Smoothing then refits the closed edge while keeping the original palette, stacking, and editability.
+                    Pass {Math.min(3, refinementPass + 1)} uses the selected edge character, closes small gaps, and rebuilds the previous SVG without changing its palette or editability.
                   </p>
                 </div>
               )}
@@ -1711,15 +1849,26 @@ export default function Page() {
           )}
 
           {/* Inline Grid Stepper & Console Log */}
-          <section className="space-y-2 pt-2 border-t border-[var(--panel-border)]">
-            <div className="flex items-center justify-between">
-              <h2 className="text-[10px] text-[var(--muted)] uppercase tracking-wider font-semibold">
-                Pipeline Status {poolSize > 0 && `(${poolSize} workers)`}
-              </h2>
-            </div>
+          <section className="overflow-hidden rounded-xl border border-white/8 bg-black/20">
+            <button
+              type="button"
+              onClick={() => setDiagnosticsOpen((open) => !open)}
+              className="flex w-full items-center justify-between px-3 py-2 text-left"
+            >
+              <span>
+                <span className="block text-[9px] font-semibold uppercase tracking-wider text-white/55">
+                  Technical details {poolSize > 0 && `· ${poolSize} workers`}
+                </span>
+                <span className="mt-0.5 block text-[9px] text-white/25">
+                  Pipeline stages and processing log
+                </span>
+              </span>
+              <span className={`text-xs text-white/35 transition-transform ${diagnosticsOpen ? "rotate-180" : ""}`}>⌄</span>
+            </button>
 
-            {/* Compact 2x2 Grid Stepper */}
-            <div className="grid grid-cols-2 gap-1.5">
+            {diagnosticsOpen && (
+              <div className="space-y-2 border-t border-white/8 p-2">
+                <div className="grid grid-cols-2 gap-1.5">
               {steps.map((step) => {
                 const isCurrent = step.status === "running";
                 const isDone = step.status === "completed";
@@ -1739,10 +1888,9 @@ export default function Page() {
                   </div>
                 );
               })}
-            </div>
+                </div>
 
-            {/* Compact Stdout Console */}
-            <div className="bg-black/80 rounded-lg border border-white/10 p-2 font-mono text-[9px] text-emerald-400/90 h-20 overflow-y-auto space-y-0.5 shadow-inner">
+                <div className="bg-black/80 rounded-lg border border-white/10 p-2 font-mono text-[9px] text-emerald-400/90 h-20 overflow-y-auto space-y-0.5 shadow-inner">
               {log.length === 0 ? (
                 <div className="text-white/20 italic">Ready for job dispatch...</div>
               ) : (
@@ -1754,12 +1902,18 @@ export default function Page() {
                 ))
               )}
               <div ref={logEndRef} />
-            </div>
+                </div>
+              </div>
+            )}
           </section>
 
           {/* Export & Action Panel */}
           {rawSvgContent && !running && (
-            <section className="space-y-2 pt-2 border-t border-[var(--panel-border)] animate-in fade-in duration-300">
+            <section className="rounded-2xl border border-[var(--accent)]/20 bg-[var(--accent)]/[0.035] p-3 space-y-2 animate-in fade-in duration-300">
+              <h2 className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-white/75">
+                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[var(--accent)]/15 text-[9px] text-[var(--accent)]">4</span>
+                Export
+              </h2>
               <div className="flex items-center justify-between text-[10px] text-[var(--muted)] font-mono">
                 <span>Wall Time: <b className="text-[var(--accent)]">{secs}s</b></span>
                 <span>Layers: <b className="text-white">{results.length || svgVectors.length}</b></span>
@@ -1854,7 +2008,7 @@ export default function Page() {
           )}
 
         </div>
-      </div>
+      </aside>
 
       {/* ---------------- RIGHT PANE: Visual Stage (70%) ---------------- */}
       <div
@@ -1955,6 +2109,75 @@ export default function Page() {
             </div>
           </div>
         </div>
+
+        {running && (
+          <div
+            data-testid="pipeline-progress-overlay"
+            aria-live="polite"
+            aria-busy="true"
+            className="absolute inset-0 z-40 flex items-center justify-center bg-[#07080b]/55 backdrop-blur-sm p-8"
+          >
+            <div className="w-full max-w-md overflow-hidden rounded-3xl border border-white/10 bg-[#111216]/95 shadow-[0_28px_90px_rgba(0,0,0,0.65)]">
+              <div className="border-b border-white/8 px-6 py-5">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[var(--accent)]">
+                      {refinementPass > 1 ? `Refinement pass ${refinementPass}` : "Building your vector"}
+                    </p>
+                    <h2 className="mt-1.5 text-lg font-semibold text-white">
+                      {currentPipelineStep.label}
+                    </h2>
+                    <p className="mt-1 text-xs leading-relaxed text-white/50">
+                      {currentPipelineStep.detail}
+                    </p>
+                  </div>
+                  <span className="shrink-0 rounded-full border border-[var(--accent)]/25 bg-[var(--accent)]/10 px-2.5 py-1 font-mono text-[11px] font-bold text-[var(--accent)]">
+                    {pipelineProgress}%
+                  </span>
+                </div>
+                <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-white/8">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-[#b98a16] via-[var(--accent)] to-[#fff0a3] transition-[width] duration-500 ease-out"
+                    style={{ width: `${Math.max(4, pipelineProgress)}%` }}
+                  />
+                </div>
+                {currentPipelineStep.id === "compute" && activeJobs.length > 0 && (
+                  <div className="mt-2 flex justify-between text-[10px] text-white/35">
+                    <span>Layer {Math.min(completedLayerCount + 1, activeJobs.length)} of {activeJobs.length}</span>
+                    <span>{poolSize} warm worker{poolSize === 1 ? "" : "s"}</span>
+                  </div>
+                )}
+              </div>
+              <div className="grid grid-cols-4 gap-px bg-white/5">
+                {steps.map((step, index) => {
+                  const active = step.status === "running";
+                  const complete = step.status === "completed";
+                  const error = step.status === "error";
+                  return (
+                    <div key={step.id} className="bg-[#0d0e12] px-2 py-3 text-center">
+                      <span className={`mx-auto flex h-6 w-6 items-center justify-center rounded-full border text-[9px] font-bold ${
+                        complete ? "border-emerald-400/40 bg-emerald-400/15 text-emerald-300"
+                          : active ? "border-[var(--accent)] bg-[var(--accent)] text-black animate-pulse"
+                            : error ? "border-red-400/40 bg-red-400/15 text-red-300"
+                              : "border-white/10 bg-white/5 text-white/30"
+                      }`}>
+                        {complete ? "✓" : index + 1}
+                      </span>
+                      <span className={`mt-1.5 block truncate text-[8px] font-semibold uppercase tracking-wide ${
+                        active ? "text-[var(--accent)]" : complete ? "text-white/70" : "text-white/25"
+                      }`}>
+                        {step.label.replace(" Environment", "").replace(" Computation", "").replace(" Preparation", "")}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="px-6 py-3 text-center text-[10px] text-white/30">
+                Keep this tab open. Processing stays entirely on this device.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* State 1: Idle Empty State */}
         {!img && !activeJobs.length && (

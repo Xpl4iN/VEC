@@ -1,4 +1,4 @@
-// Stage 0 for SVG inputs — a REAL parser (browser DOMParser, not regex; gotcha 1)
+// Stage 0 for SVG inputs: a real parser (browser DOMParser, not regex; gotcha 1)
 // with an ARC-SAFE path scaler (gotcha 2). Handles the two real cases from the spec:
 //   1. raster-in-a-wrapper: base64 <image> elements (optionally via <use> + x/y),
 //      composited to a canvas the palette picker can sample.
@@ -6,7 +6,18 @@
 // This replaces the provisional regex scaler that could corrupt arcs.
 
 export type RasterPlacement = { href: string; x: number; y: number; w: number; h: number };
-export type VectorPath = { d: string; fill: string };
+export type VectorPath = {
+  d: string;
+  fill: string;
+  stroke?: string;
+  strokeWidth?: string;
+  strokeLinecap?: string;
+  strokeLinejoin?: string;
+  strokeMiterlimit?: string;
+  strokeOpacity?: string;
+  fillOpacity?: string;
+  opacity?: string;
+};
 
 export type SvgInput = {
   width: number;
@@ -14,6 +25,7 @@ export type SvgInput = {
   viewBox: [number, number, number, number];
   rasters: RasterPlacement[];
   vectors: VectorPath[];
+  paintDefs: string;
   fullCanvasRects: { fill: string }[];
   unsupported: string[]; // element tags we didn't handle, for honest UI reporting
 };
@@ -23,29 +35,95 @@ function num(v: string | null, d = 0): number {
   return Number.isFinite(n) ? n : d;
 }
 
-// Resolve `<style>.cls{fill:..}` + class="" and inline style="fill:.." to a hex/color.
-function resolveFill(el: Element, styleMap: Map<string, string>): string {
-  const attr = el.getAttribute("fill");
-  if (attr && attr !== "inherit") return attr;
-  const inline = /fill:\s*([^;]+)/.exec(el.getAttribute("style") || "");
-  if (inline) return inline[1].trim();
-  for (const cls of (el.getAttribute("class") || "").split(/\s+/)) {
-    const f = styleMap.get(cls);
-    if (f) return f;
+type Presentation = Record<string, string>;
+const presentationProperties = new Set([
+  "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
+  "stroke-miterlimit", "stroke-opacity", "fill-opacity", "opacity",
+  "stop-color", "stop-opacity",
+]);
+
+function declarations(value: string): Presentation {
+  const result: Presentation = {};
+  for (const declaration of value.split(";")) {
+    const colon = declaration.indexOf(":");
+    if (colon < 0) continue;
+    const property = declaration.slice(0, colon).trim().toLowerCase();
+    const propertyValue = declaration.slice(colon + 1).trim();
+    if (propertyValue && presentationProperties.has(property)) result[property] = propertyValue;
   }
-  return "#000000";
+  return result;
 }
 
-function buildStyleMap(doc: Document): Map<string, string> {
-  const map = new Map<string, string>();
+function buildPresentationStyleMap(doc: Document): Map<string, Presentation> {
+  const map = new Map<string, Presentation>();
   for (const style of Array.from(doc.querySelectorAll("style"))) {
-    const css = style.textContent || "";
-    // .cls { fill: #rrggbb } — parsed with a scoped regex over CSS text (not the SVG tree)
-    for (const m of css.matchAll(/\.([\w-]+)\s*\{[^}]*?fill:\s*([^;}\s]+)/g)) {
-      map.set(m[1], m[2]);
-    }
+    for (const match of (style.textContent || "").matchAll(/\.([\w-]+)\s*\{([^}]*)\}/g))
+      map.set(match[1], declarations(match[2]));
   }
   return map;
+}
+
+function resolvePresentation(el: Element, property: string, styleMap: Map<string, Presentation>, fallback: string): string {
+  let current: Element | null = el;
+  while (current) {
+    const attr = current.getAttribute(property);
+    if (attr && attr !== "inherit") return attr;
+    const inline = declarations(current.getAttribute("style") || "")[property];
+    if (inline && inline !== "inherit") return inline;
+    for (const cls of (current.getAttribute("class") || "").split(/\s+/)) {
+      const value = styleMap.get(cls)?.[property];
+      if (value && value !== "inherit") return value;
+    }
+    current = current.parentElement;
+  }
+  return fallback;
+}
+
+function vectorPresentation(el: Element, styleMap: Map<string, Presentation>): Omit<VectorPath, "d"> {
+  const stroke = resolvePresentation(el, "stroke", styleMap, "none");
+  return {
+    fill: resolvePresentation(el, "fill", styleMap, "#000000"),
+    ...(stroke !== "none" ? {
+      stroke,
+      strokeWidth: resolvePresentation(el, "stroke-width", styleMap, "1"),
+      strokeLinecap: resolvePresentation(el, "stroke-linecap", styleMap, "butt"),
+      strokeLinejoin: resolvePresentation(el, "stroke-linejoin", styleMap, "miter"),
+      strokeMiterlimit: resolvePresentation(el, "stroke-miterlimit", styleMap, "4"),
+      strokeOpacity: resolvePresentation(el, "stroke-opacity", styleMap, "1"),
+    } : {}),
+    fillOpacity: resolvePresentation(el, "fill-opacity", styleMap, "1"),
+    opacity: resolvePresentation(el, "opacity", styleMap, "1"),
+  };
+}
+
+function escapeXmlAttr(value: string): string {
+  return value.replace(/[&<>"]/g, (character) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character]!);
+}
+
+function serializePaintDefs(doc: Document): string {
+  const gradientAttrs = new Set([
+    "id", "x1", "y1", "x2", "y2", "cx", "cy", "r", "fx", "fy", "fr",
+    "gradientUnits", "gradientTransform", "spreadMethod",
+  ]);
+  const attrs = (el: Element) => Array.from(el.attributes)
+    .filter((attr) => gradientAttrs.has(attr.name))
+    .map((attr) => ` ${attr.name}="${escapeXmlAttr(attr.value)}"`)
+    .join("");
+  return Array.from(doc.querySelectorAll("defs linearGradient, defs radialGradient"))
+    .map((gradient) => {
+      const tag = gradient.tagName;
+      const stops = Array.from(gradient.children)
+        .filter((child) => child.tagName.toLowerCase() === "stop")
+        .map((stop) => {
+          const offset = stop.getAttribute("offset");
+          const stopStyle = declarations(stop.getAttribute("style") || "");
+          const color = stop.getAttribute("stop-color") || stopStyle["stop-color"];
+          const opacity = stop.getAttribute("stop-opacity") || stopStyle["stop-opacity"];
+          return `<stop${offset ? ` offset="${escapeXmlAttr(offset)}"` : ""}${color ? ` stop-color="${escapeXmlAttr(color)}"` : ""}${opacity ? ` stop-opacity="${escapeXmlAttr(opacity)}"` : ""}/>`;
+        }).join("");
+      return `<${tag}${attrs(gradient)}>${stops}</${tag}>`;
+    }).join("");
 }
 
 function translateOf(el: Element): [number, number] | null {
@@ -67,7 +145,8 @@ export function parseSvgInput(text: string): SvgInput {
   else vb = [0, 0, num(svg.getAttribute("width"), 100), num(svg.getAttribute("height"), 100)];
   const [, , W, H] = vb;
 
-  const styleMap = buildStyleMap(doc);
+  const styleMap = buildPresentationStyleMap(doc);
+  const paintDefs = serializePaintDefs(doc);
   const defs = new Map<string, Element>();
   for (const el of Array.from(doc.querySelectorAll("[id]"))) defs.set(el.getAttribute("id")!, el);
 
@@ -119,25 +198,35 @@ export function parseSvgInput(text: string): SvgInput {
           else if (target.tagName.toLowerCase() === "path") {
             const d = target.getAttribute("d");
             const px = ux + targetTranslation[0], py = uy + targetTranslation[1];
-            if (d && px === 0 && py === 0) vectors.push({ d, fill: resolveFill(target, styleMap) });
+            if (d && px === 0 && py === 0) vectors.push({ d, ...vectorPresentation(target, styleMap) });
             else if (d) unsupported.add("path(translate)");
-          } else if (target.tagName.toLowerCase() === "rect") {
+          } else if (["rect", "circle", "ellipse", "line", "polyline", "polygon"].includes(target.tagName.toLowerCase())) {
             const px = ux + targetTranslation[0], py = uy + targetTranslation[1];
-            vectors.push({ d: rectToPath(target, px, py), fill: resolveFill(target, styleMap) });
+            const d = primitiveToPath(target, px, py);
+            if (d) vectors.push({ d, ...vectorPresentation(target, styleMap) });
+            else unsupported.add(`${target.tagName.toLowerCase()}(geometry)`);
           } else walk(target, ux + targetTranslation[0], uy + targetTranslation[1], true);
           activeUses.delete(target);
           break;
         }
         case "path": {
           const d = el.getAttribute("d");
-          if (d && tx === 0 && ty === 0) vectors.push({ d, fill: resolveFill(el, styleMap) });
+          if (d && tx === 0 && ty === 0) vectors.push({ d, ...vectorPresentation(el, styleMap) });
           else if (d) unsupported.add("path(translate)");
           break;
         }
         case "rect": {
           const w = num(el.getAttribute("width")), h = num(el.getAttribute("height"));
-          if (w >= W - 1 && h >= H - 1 && tx === 0 && ty === 0) fullCanvasRects.push({ fill: resolveFill(el, styleMap) });
-          else vectors.push({ d: rectToPath(el, tx, ty), fill: resolveFill(el, styleMap) });
+          const hasRoundedCorners = num(el.getAttribute("rx")) > 0 || num(el.getAttribute("ry")) > 0;
+          if (w >= W - 1 && h >= H - 1 && tx === 0 && ty === 0 && !hasRoundedCorners)
+            fullCanvasRects.push({ fill: resolvePresentation(el, "fill", styleMap, "#000000") });
+          else vectors.push({ d: rectToPath(el, tx, ty), ...vectorPresentation(el, styleMap) });
+          break;
+        }
+        case "circle": case "ellipse": case "line": case "polyline": case "polygon": {
+          const d = primitiveToPath(el, tx, ty);
+          if (d) vectors.push({ d, ...vectorPresentation(el, styleMap) });
+          else unsupported.add(`${tag}(geometry)`);
           break;
         }
         case "g": case "svg": case "symbol": walk(el, tx, ty, referenced); break;
@@ -151,13 +240,46 @@ export function parseSvgInput(text: string): SvgInput {
   };
   walk(svg);
 
-  return { width: W, height: H, viewBox: vb, rasters, vectors, fullCanvasRects, unsupported: [...unsupported] };
+  return { width: W, height: H, viewBox: vb, rasters, vectors, paintDefs, fullCanvasRects, unsupported: [...unsupported] };
 }
 
 function rectToPath(el: Element, dx = 0, dy = 0): string {
   const x = dx + num(el.getAttribute("x")), y = dy + num(el.getAttribute("y"));
   const w = num(el.getAttribute("width")), h = num(el.getAttribute("height"));
+  let rx = num(el.getAttribute("rx")), ry = num(el.getAttribute("ry"));
+  if (rx && !ry) ry = rx;
+  if (ry && !rx) rx = ry;
+  rx = Math.min(Math.max(rx, 0), w / 2);
+  ry = Math.min(Math.max(ry, 0), h / 2);
+  if (rx && ry)
+    return `M${x + rx} ${y}H${x + w - rx}A${rx} ${ry} 0 0 1 ${x + w} ${y + ry}V${y + h - ry}A${rx} ${ry} 0 0 1 ${x + w - rx} ${y + h}H${x + rx}A${rx} ${ry} 0 0 1 ${x} ${y + h - ry}V${y + ry}A${rx} ${ry} 0 0 1 ${x + rx} ${y}Z`;
   return `M${x} ${y}H${x + w}V${y + h}H${x}Z`;
+}
+
+function primitiveToPath(el: Element, dx = 0, dy = 0): string | null {
+  const tag = el.tagName.toLowerCase();
+  if (tag === "rect") return rectToPath(el, dx, dy);
+  if (tag === "line") {
+    const x1 = dx + num(el.getAttribute("x1")), y1 = dy + num(el.getAttribute("y1"));
+    const x2 = dx + num(el.getAttribute("x2")), y2 = dy + num(el.getAttribute("y2"));
+    return `M${x1} ${y1}L${x2} ${y2}`;
+  }
+  if (tag === "circle" || tag === "ellipse") {
+    const cx = dx + num(el.getAttribute("cx")), cy = dy + num(el.getAttribute("cy"));
+    const rx = tag === "circle" ? num(el.getAttribute("r")) : num(el.getAttribute("rx"));
+    const ry = tag === "circle" ? rx : num(el.getAttribute("ry"));
+    if (rx <= 0 || ry <= 0) return null;
+    return `M${cx - rx} ${cy}A${rx} ${ry} 0 1 0 ${cx + rx} ${cy}A${rx} ${ry} 0 1 0 ${cx - rx} ${cy}Z`;
+  }
+  if (tag === "polyline" || tag === "polygon") {
+    const values = (el.getAttribute("points") || "").match(/[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi)?.map(Number) || [];
+    if (values.length < 4 || values.length % 2 !== 0) return null;
+    const pairs: string[] = [];
+    for (let index = 0; index < values.length; index += 2)
+      pairs.push(`${values[index] + dx} ${values[index + 1] + dy}`);
+    return `M${pairs[0]}${pairs.slice(1).map((pair) => `L${pair}`).join("")}${tag === "polygon" ? "Z" : ""}`;
+  }
+  return null;
 }
 
 // Composite the raster placements onto a canvas sized to the viewBox, so the
@@ -181,7 +303,7 @@ export async function compositeRasters(input: SvgInput): Promise<HTMLCanvasEleme
 }
 
 // ARC-SAFE path-data scaler. Tokenises commands and scales only length operands.
-// For A/a (elliptical arc): scales rx, ry, x, y — leaves x-rotation and the two
+// For A/a (elliptical arc): scales rx, ry, x, y, while leaving x-rotation and the two
 // boolean flags UNTOUCHED (spec gotcha 2). Safe for M L H V C S Q T A Z (+ rel).
 export function scalePathData(d: string, k: number, dx = 0, dy = 0): string {
   const tokens = d.match(/[a-zA-Z]|-?\d*\.?\d+(?:[eE][-+]?\d+)?/g) || [];
@@ -211,7 +333,7 @@ export function scalePathData(d: string, k: number, dx = 0, dy = 0): string {
     }
     else if (c === "a") {
       const [rx, ry, rot, laf, sf, x, y] = readNums(7);
-      // scale rx, ry, x, y — NOT rotation, NOT flags
+      // Scale rx, ry, x, y, but not rotation or flags.
       emit(cmd, [
         rx * k, ry * k, rot, laf, sf,
         (x + (absolute() ? dx : 0)) * k,
@@ -223,4 +345,21 @@ export function scalePathData(d: string, k: number, dx = 0, dy = 0): string {
     else throw new Error(`Unsupported SVG path command: ${cmd}`);
   }
   return out.join("");
+}
+
+export function scalePaintDefs(markup: string, k: number, dx = 0, dy = 0): string {
+  if (!markup || (k === 1 && dx === 0 && dy === 0)) return markup;
+  const transform = `scale(${k})${dx || dy ? ` translate(${dx} ${dy})` : ""}`;
+  return markup.replace(/<(linearGradient|radialGradient)\b([^>]*)>/g, (opening, tag: string, attrs: string) => {
+    if (!/\bgradientUnits="userSpaceOnUse"/.test(attrs)) return opening;
+    if (/\bgradientTransform="/.test(attrs))
+      return `<${tag}${attrs.replace(/\bgradientTransform="([^"]*)"/, `gradientTransform="${transform} $1"`)}>`;
+    return `<${tag}${attrs} gradientTransform="${transform}">`;
+  });
+}
+
+export function scaleStrokeWidth(value: string | undefined, k: number): string | undefined {
+  if (!value) return undefined;
+  const match = /^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*([a-z]*)\s*$/i.exec(value);
+  return match ? `${Number(match[1]) * k}${match[2]}` : value;
 }
