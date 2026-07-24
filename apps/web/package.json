@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "test:regions": "node --experimental-strip-types --test lib/regions.test.ts",
     "start": "next start",
     "serve:export": "node serve-export.mjs"
   },

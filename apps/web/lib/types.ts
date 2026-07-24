@@ -27,6 +27,8 @@ export type LayerJob = {
     edgeCharacter?: "straight" | "curved" | "rounded";
     source?: "original-raster" | "previous-svg";
   };
+  treatmentRegionId?: string | null;
+  treatmentRole?: TreatmentRole | null;
   expected: string | null;            // optional regression path for byte-identity
   // presentation (not sent to python)
   fill: string;
@@ -45,3 +47,22 @@ export type LayerResult = {
 };
 
 export type Profile = "organic" | "detailed" | "geometric";
+
+export type TreatmentRole = "text" | "illustration" | "geometric" | "custom";
+
+export type CurvedBand = {
+  start: [number, number];
+  control: [number, number];
+  end: [number, number];
+  halfWidth: number;
+};
+
+export type TreatmentRegion = {
+  id: string;
+  name: string;
+  geometry: CurvedBand;
+  role: TreatmentRole;
+  character: number;
+  priority: number;
+  enabled: boolean;
+};

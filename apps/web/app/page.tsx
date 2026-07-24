@@ -5,7 +5,8 @@ import { assembleLayers, type AssembledLayer, type ComponentStacking } from "@/l
 import { consolidateSimilarColors } from "@/lib/palette";
 import { parseSvgInput, compositeRasters, scalePaintDefs, scalePathData, scaleStrokeWidth, type VectorPath } from "@/lib/svgInput";
 import { ComputePool, choosePoolSize, type PoolEvents } from "@/lib/pool";
-import type { LayerJob, LayerResult, Profile } from "@/lib/types";
+import { bandPath, buildRegionSources, centerPath, profileForRegion } from "@/lib/regions";
+import type { LayerJob, LayerResult, Profile, TreatmentRegion, TreatmentRole } from "@/lib/types";
 
 // Detect the background colour from an image's border (a logo's background is
 // whatever dominates the edges). Returns null if the border is mostly transparent.
@@ -249,6 +250,12 @@ export default function Page() {
   const [activeJobs, setActiveJobs] = useState<LayerJob[]>([]);
   const [activeViewBox, setActiveViewBox] = useState<string>("0 0 100 100");
   const [copied, setCopied] = useState(false);
+  const [regions, setRegions] = useState<TreatmentRegion[]>([]);
+  const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
+  const [regionEditorOpen, setRegionEditorOpen] = useState(false);
+  const [draggedRegionHandle, setDraggedRegionHandle] = useState<"start" | "control" | "end" | "move" | null>(null);
+  const regionOverlayRef = useRef<SVGSVGElement | null>(null);
+  const regionDragPointRef = useRef<[number, number] | null>(null);
 
   // Background Rect & Transparency Export Settings
   const [includeBg, setIncludeBg] = useState(false);
@@ -345,6 +352,102 @@ export default function Page() {
     setIsAnimatingReveal(false);
     resetSteps();
   };
+
+  const updateRegion = useCallback((id: string, patch: Partial<TreatmentRegion>) => {
+    setRegions((previous) => previous.map((region) => region.id === id ? { ...region, ...patch } : region));
+  }, []);
+
+  const addTreatmentRegion = useCallback(() => {
+    if (!img) return;
+    if (svgVectors.length && sampleCanvas.current) {
+      const canvas = sampleCanvas.current;
+      setPicks(extractWithBg(canvas.getContext("2d")!, canvas.width, canvas.height));
+      setSvgVectors([]);
+      setSvgPaintDefs("");
+      setSvgNote("Pure-vector source switched to regional re-vectorization");
+      setRawSvgContent(null);
+      setSvgUrl(null);
+      setResults([]);
+      showToast("Regional editing will re-vectorize the SVG source");
+    }
+    const index = regions.length + 1;
+    const id = `region-${Date.now().toString(36)}-${index}`;
+    const region: TreatmentRegion = {
+      id,
+      name: `Treatment ${index}`,
+      role: "text",
+      character: 0.35,
+      priority: index,
+      enabled: true,
+      geometry: {
+        start: [img.w * 0.18, img.h * 0.3],
+        control: [img.w * 0.5, img.h * 0.3],
+        end: [img.w * 0.82, img.h * 0.3],
+        halfWidth: Math.max(12, img.h * 0.1),
+      },
+    };
+    setRegions((previous) => [...previous, region]);
+    setActiveRegionId(id);
+    setRegionEditorOpen(true);
+  }, [img, regions.length, svgVectors.length]);
+
+  const pointerToArtwork = useCallback((event: React.PointerEvent<SVGElement>): [number, number] | null => {
+    const svg = regionOverlayRef.current;
+    if (!svg) return null;
+    const point = svg.createSVGPoint();
+    point.x = event.clientX;
+    point.y = event.clientY;
+    const matrix = svg.getScreenCTM()?.inverse();
+    if (!matrix) return null;
+    const transformed = point.matrixTransform(matrix);
+    return [transformed.x, transformed.y];
+  }, []);
+
+  const moveRegionHandle = useCallback((event: React.PointerEvent<SVGSVGElement>) => {
+    if (!draggedRegionHandle || !activeRegionId || !img) return;
+    const point = pointerToArtwork(event);
+    if (!point) return;
+    const clamped: [number, number] = [
+      Math.max(0, Math.min(img.w, point[0])),
+      Math.max(0, Math.min(img.h, point[1])),
+    ];
+    if (draggedRegionHandle === "move") {
+      const previousPoint = regionDragPointRef.current;
+      if (!previousPoint) {
+        regionDragPointRef.current = clamped;
+        return;
+      }
+      const dx = clamped[0] - previousPoint[0];
+      const dy = clamped[1] - previousPoint[1];
+      regionDragPointRef.current = clamped;
+      setRegions((previous) => previous.map((region) => {
+        if (region.id !== activeRegionId) return region;
+        const points = [region.geometry.start, region.geometry.control, region.geometry.end];
+        const margin = region.geometry.halfWidth;
+        const minX = Math.min(...points.map(([x]) => x)) - margin;
+        const maxX = Math.max(...points.map(([x]) => x)) + margin;
+        const minY = Math.min(...points.map(([, y]) => y)) - margin;
+        const maxY = Math.max(...points.map(([, y]) => y)) + margin;
+        const safeDx = Math.max(-minX, Math.min(img.w - maxX, dx));
+        const safeDy = Math.max(-minY, Math.min(img.h - maxY, dy));
+        const translate = ([x, y]: [number, number]): [number, number] => [x + safeDx, y + safeDy];
+        return {
+          ...region,
+          geometry: {
+            ...region.geometry,
+            start: translate(region.geometry.start),
+            control: translate(region.geometry.control),
+            end: translate(region.geometry.end),
+          },
+        };
+      }));
+      return;
+    }
+    setRegions((previous) => previous.map((region) =>
+      region.id === activeRegionId
+        ? { ...region, geometry: { ...region.geometry, [draggedRegionHandle]: clamped } }
+        : region));
+  }, [activeRegionId, draggedRegionHandle, img, pointerToArtwork]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -634,6 +737,7 @@ export default function Page() {
 
   const onFile = useCallback(async (file: File) => {
     reset(); setPicks([]); setArcWarning(false); setSvgVectors([]); setSvgPaintDefs(""); setSvgOrigin([0, 0]); setSvgNote(null);
+    setRegions([]); setActiveRegionId(null); setRegionEditorOpen(false);
     setSourceSnapshot({
       name: file.name,
       type: file.type || "application/octet-stream",
@@ -668,7 +772,19 @@ export default function Page() {
         }));
         const svg = assembleLayers(passthrough, viewBox, includeBg ? bgHex : null, componentStacking,
           scalePaintDefs(parsed.paintDefs, scale, -parsed.viewBox[0], -parsed.viewBox[1]));
-        setImg({ url: URL.createObjectURL(file), w: parsed.width, h: parsed.height, isSvg: true });
+        const sourceUrl = URL.createObjectURL(file);
+        const sourceImage = new Image();
+        await new Promise<void>((resolve, reject) => {
+          sourceImage.onload = () => resolve();
+          sourceImage.onerror = () => reject(new Error("Could not rasterize SVG for regional editing"));
+          sourceImage.src = sourceUrl;
+        });
+        const sourceCanvas = document.createElement("canvas");
+        sourceCanvas.width = parsed.width;
+        sourceCanvas.height = parsed.height;
+        sourceCanvas.getContext("2d")!.drawImage(sourceImage, 0, 0, parsed.width, parsed.height);
+        sampleCanvas.current = sourceCanvas;
+        setImg({ url: sourceUrl, w: parsed.width, h: parsed.height, isSvg: true });
         setActiveViewBox(viewBox);
         setRawSvgContent(svg);
         setSvgUrl(URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" })));
@@ -911,6 +1027,7 @@ export default function Page() {
             edgeCharacter: jobs[0]?.refinement?.edgeCharacter ?? "curved",
             source: jobs[0]?.refinement?.source ?? "original-raster",
           },
+          treatmentRegions: regions,
         },
         palette: paletteSnapshot.map((pick, index) => ({
           index,
@@ -953,7 +1070,7 @@ export default function Page() {
   }, [
     includeBg, bgHex, svgVectors, svgPaintDefs, svgOrigin, svgNote, scale, sourceSnapshot, img,
     stageBg, kColorsCount, colorMergeThreshold, showQuantizedPreview, picks, layerCoverages,
-    qualityPreset, componentStacking, smoothingCap, fitError, cornerWindow, cornerAngle,
+    qualityPreset, componentStacking, smoothingCap, fitError, cornerWindow, cornerAngle, regions,
     tinyCurve, minAreaFraction,
   ]);
 
@@ -1049,60 +1166,108 @@ export default function Page() {
     const palette = effectivePicks.map((p) => p.rgb);
     const layerPicks = effectivePicks.map((p, i) => ({ p, i })).filter(({ p }) => p.role === "layer");
     if (!layerPicks.length) { addLog("Pick at least one colour and mark it as a Layer"); return; }
-    const pngB64 = await urlToB64(img.url);
     const capVal = Math.max(0.25, 2.0 / Math.max(1, scale / 2));
     const tolVal = Math.max(0.2, 1.0 / Math.max(1, scale / 2));
-    const jobs: LayerJob[] = layerPicks.map(({ p, i }, k) => {
-      return {
-        jobId: k, name: `user-${i}`, engine: p.profile === "geometric" ? "smooth3" : "smooth2",
-        useG1: p.profile === "geometric", file: "user.png", offset: [0, 0], palette, idx: i,
-        cfg: p.profile === "geometric" ? [capVal, tolVal, true, 25.0, 25.0] : null, scale,
-        quality: {
-          smoothingCap,
-          fitError,
-          cornerWindow,
-          cornerAngle,
-          tinyCurve,
-          minAreaFraction,
-        },
-        refinement: { pass: 1, gapCloseRadius: 0, edgeSmoothing: 1, source: "original-raster" },
-        expected: null, fill: p.hex, id: p.name,
-      };
-    });
-    await execute(jobs, { "user.png": pngB64 }, `0 0 ${img.w * scale} ${img.h * scale}`, effectivePicks);
+    const baseQuality = {
+      smoothingCap,
+      fitError,
+      cornerWindow,
+      cornerAngle,
+      tinyCurve,
+      minAreaFraction,
+    };
+    const sources = await buildRegionSources(canvas!, palette, regions, layerPicks.map(({ i }) => i));
+    const pngs = Object.fromEntries(sources.map((source) => [source.filename, source.pngBase64]));
+    let jobId = 0;
+    const jobs: LayerJob[] = sources.flatMap((source) =>
+      layerPicks
+        .filter(({ i }) => source.paletteIndices.includes(i))
+        .map(({ p, i }) => {
+          const regional = profileForRegion(source.region, baseQuality, scale);
+          const defaultEngine = p.profile === "geometric" ? "smooth3" as const : "smooth2" as const;
+          const isRegional = source.region != null && source.region.role !== "custom";
+          return {
+            jobId: jobId++,
+            name: `user-${i}-${source.key}`,
+            engine: isRegional ? regional.engine : defaultEngine,
+            useG1: isRegional ? regional.useG1 : p.profile === "geometric",
+            file: source.filename,
+            offset: [0, 0] as [number, number],
+            palette,
+            idx: i,
+            cfg: isRegional
+              ? regional.cfg
+              : p.profile === "geometric" ? [capVal, tolVal, true, 25.0, 25.0] as LayerJob["cfg"] : null,
+            scale,
+            quality: regional.quality,
+            treatmentRegionId: source.region?.id ?? null,
+            treatmentRole: source.region?.role ?? null,
+            refinement: {
+              pass: 1,
+              gapCloseRadius: regional.gapCloseRadius,
+              edgeSmoothing: 1,
+              source: "original-raster" as const,
+            },
+            expected: null,
+            fill: p.hex,
+            id: source.region ? `${p.name}-${source.region.id}` : p.name,
+          };
+        }));
+    addLog(`Treatment assignment: ${sources.reduce((sum, source) => sum + source.componentCount, 0)} components across ${sources.length} source group(s)`);
+    await execute(jobs, pngs, `0 0 ${img.w * scale} ${img.h * scale}`, effectivePicks);
   }, [
     img, picks, scale, execute, smoothingCap, fitError, cornerWindow, cornerAngle,
-    tinyCurve, minAreaFraction,
+    tinyCurve, minAreaFraction, regions,
   ]);
 
   const runRefinement = useCallback(async () => {
     if (!img || !rawSvgContent || activeJobs.length === 0 || running) return;
     const nextPass = Math.min(3, refinementPass + 1);
     const pngB64 = await rasterizeSvgToB64(rawSvgContent, img.w, img.h);
-    const jobs = activeJobs.map((job) => {
+    const refinementImage = new Image();
+    await new Promise<void>((resolve, reject) => {
+      refinementImage.onload = () => resolve();
+      refinementImage.onerror = () => reject(new Error("Could not prepare regional refinement masks"));
+      refinementImage.src = `data:image/png;base64,${pngB64}`;
+    });
+    const refinementCanvas = document.createElement("canvas");
+    refinementCanvas.width = img.w;
+    refinementCanvas.height = img.h;
+    refinementCanvas.getContext("2d")!.drawImage(refinementImage, 0, 0);
+    const palette = activeJobs[0].palette ?? [];
+    const activePaletteIndices = [...new Set(activeJobs.map((job) => job.idx).filter((index): index is number => index != null))];
+    const regionSources = await buildRegionSources(refinementCanvas, palette, regions, activePaletteIndices);
+    const sourceByRegion = new Map(regionSources.map((source) => [source.region?.id ?? "default", source]));
+    const pngs = Object.fromEntries(regionSources.map((source) => [source.filename, source.pngBase64]));
+    const jobs = activeJobs.flatMap((job) => {
+      const source = sourceByRegion.get(job.treatmentRegionId ?? "default");
+      if (!source) return [];
       const quality = { ...(job.quality ?? {
         smoothingCap, fitError, cornerWindow, cornerAngle, tinyCurve, minAreaFraction,
       }) };
+      const treatmentRegion = regions.find((region) => region.id === job.treatmentRegionId) ?? null;
+      const regionalProfile = treatmentRegion ? profileForRegion(treatmentRegion, quality, scale) : null;
       const cap = Math.max(0.5, quality.smoothingCap * refinementSmoothing);
       const tolerance = Math.max(0.25, quality.fitError * 3);
-      if (edgeCharacter === "straight") {
+      if (!regionalProfile && edgeCharacter === "straight") {
         quality.cornerAngle = Math.min(45, quality.cornerAngle);
         quality.tinyCurve = Math.max(3, quality.tinyCurve);
-      } else if (edgeCharacter === "rounded") {
+      } else if (!regionalProfile && edgeCharacter === "rounded") {
         quality.cornerWindow = Math.max(10, quality.cornerWindow);
         quality.cornerAngle = 120;
         quality.tinyCurve = Math.max(3, quality.tinyCurve);
       }
-      return {
+      return [{
         ...job,
-        engine: edgeCharacter === "curved" ? "smooth2" as const : "smooth3" as const,
-        useG1: edgeCharacter !== "curved",
-        cfg: edgeCharacter === "curved"
+        file: source.filename,
+        engine: regionalProfile?.engine ?? (edgeCharacter === "curved" ? "smooth2" as const : "smooth3" as const),
+        useG1: regionalProfile?.useG1 ?? edgeCharacter !== "curved",
+        cfg: regionalProfile?.cfg ?? (edgeCharacter === "curved"
           ? null
           : edgeCharacter === "straight"
             ? [cap, tolerance, false, 8, 1e9] as LayerJob["cfg"]
-            : [cap, tolerance, true, 10, 8] as LayerJob["cfg"],
-        quality,
+            : [cap, tolerance, true, 10, 8] as LayerJob["cfg"]),
+        quality: regionalProfile?.quality ?? quality,
         refinement: {
           pass: nextPass,
           gapCloseRadius,
@@ -1110,13 +1275,13 @@ export default function Page() {
           edgeCharacter,
           source: "previous-svg" as const,
         },
-      };
+      }];
     });
-    await execute(jobs, { [jobs[0].file]: pngB64 }, activeViewBox);
+    await execute(jobs, pngs, activeViewBox);
   }, [
     img, rawSvgContent, activeJobs, activeViewBox, running, refinementPass, gapCloseRadius,
     refinementSmoothing, edgeCharacter, smoothingCap, fitError, cornerWindow, cornerAngle,
-    tinyCurve, minAreaFraction, execute,
+    tinyCurve, minAreaFraction, execute, regions,
   ]);
 
   const onStageImageClick = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
@@ -1587,6 +1752,123 @@ export default function Page() {
                       Lower smoothing and cleanup preserve lettering and tiny illustration details. Higher values produce fewer nodes.
                     </p>
                   </div>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-sky-400/25 bg-sky-400/5 p-2.5 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h3 className="text-[10px] font-bold uppercase tracking-wider text-sky-300">
+                      Treatment regions
+                    </h3>
+                    <p className="text-[9px] leading-tight text-white/40">
+                      Assign whole letters or illustration components to local fitting profiles.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!img}
+                    onClick={addTreatmentRegion}
+                    className="shrink-0 rounded-lg border border-sky-300/30 bg-sky-300/10 px-2 py-1 text-[9px] font-bold text-sky-200 disabled:opacity-30"
+                  >
+                    + Add region
+                  </button>
+                </div>
+                {regions.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setRegionEditorOpen((open) => !open)}
+                      className={`w-full rounded-lg border px-2 py-1.5 text-[9px] font-semibold ${
+                        regionEditorOpen
+                          ? "border-sky-300 bg-sky-300 text-slate-950"
+                          : "border-white/10 bg-black/30 text-white/60"
+                      }`}
+                    >
+                      {regionEditorOpen ? "Editing regions on canvas" : "Show region handles"}
+                    </button>
+                    <div className="max-h-52 space-y-1.5 overflow-y-auto pr-1">
+                      {regions.map((region) => (
+                        <div
+                          key={region.id}
+                          onClick={() => setActiveRegionId(region.id)}
+                          className={`rounded-lg border p-2 space-y-1.5 cursor-pointer ${
+                            activeRegionId === region.id
+                              ? "border-sky-300/70 bg-sky-300/10"
+                              : "border-white/8 bg-black/25"
+                          }`}
+                        >
+                          <div className="flex items-center gap-1">
+                            <input
+                              value={region.name}
+                              onChange={(event) => updateRegion(region.id, { name: event.target.value })}
+                              className="min-w-0 flex-1 rounded border border-white/10 bg-black/30 px-1.5 py-1 text-[10px] text-white"
+                            />
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setRegions((previous) => previous.filter((item) => item.id !== region.id));
+                                if (activeRegionId === region.id) setActiveRegionId(null);
+                              }}
+                              className="rounded px-1.5 py-1 text-[10px] text-red-300 hover:bg-red-400/10"
+                              title="Delete region"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                          <select
+                            value={region.role}
+                            onChange={(event) => updateRegion(region.id, { role: event.target.value as TreatmentRole })}
+                            className="w-full rounded border border-white/10 bg-[#16171b] px-1.5 py-1 text-[10px] text-white/75"
+                          >
+                            <option value="text">Text</option>
+                            <option value="illustration">Illustration</option>
+                            <option value="geometric">Border / geometric</option>
+                            <option value="custom">Use global settings</option>
+                          </select>
+                          {region.role === "text" && (
+                            <label className="block space-y-1">
+                              <span className="flex justify-between text-[9px] text-white/50">
+                                <span>Geometric</span>
+                                <span>Hand-drawn</span>
+                              </span>
+                              <input
+                                type="range"
+                                min="0"
+                                max="1"
+                                step="0.05"
+                                value={region.character}
+                                onChange={(event) => updateRegion(region.id, { character: Number(event.target.value) })}
+                                className="w-full accent-sky-300"
+                              />
+                            </label>
+                          )}
+                          <label className="block space-y-1">
+                            <span className="flex justify-between text-[9px] text-white/50">
+                              <span>Band thickness</span>
+                              <span>{Math.round(region.geometry.halfWidth * 2)} px</span>
+                            </span>
+                            <input
+                              type="range"
+                              min={Math.max(4, (img?.h ?? 100) * 0.01)}
+                              max={Math.max(20, (img?.h ?? 100) * 0.35)}
+                              step="1"
+                              value={region.geometry.halfWidth}
+                              onChange={(event) => setRegions((previous) => previous.map((item) =>
+                                item.id === region.id
+                                  ? { ...item, geometry: { ...item.geometry, halfWidth: Number(event.target.value) } }
+                                  : item))}
+                              className="w-full accent-sky-300"
+                            />
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[9px] leading-tight text-white/35">
+                      Drag inside the shaded band to move it. Drag the center handle to bend it. Entire connected components are assigned by overlap, so letter counters remain intact.
+                    </p>
+                  </>
                 )}
               </div>
 
@@ -2221,6 +2503,87 @@ export default function Page() {
                 />
               ) : null}
             </div>
+
+            {img && regions.length > 0 && regionEditorOpen && !running && (
+              <svg
+                ref={regionOverlayRef}
+                data-testid="treatment-region-overlay"
+                viewBox={`0 0 ${img.w} ${img.h}`}
+                preserveAspectRatio="xMidYMid meet"
+                className="absolute inset-12 z-30 touch-none"
+                onPointerMove={moveRegionHandle}
+                onPointerUp={() => {
+                  setDraggedRegionHandle(null);
+                  regionDragPointRef.current = null;
+                }}
+                onPointerCancel={() => {
+                  setDraggedRegionHandle(null);
+                  regionDragPointRef.current = null;
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                {regions.filter((region) => region.enabled).map((region) => {
+                  const selected = activeRegionId === region.id;
+                  const color = region.role === "text"
+                    ? "#7dd3fc"
+                    : region.role === "illustration"
+                      ? "#86efac"
+                      : region.role === "geometric" ? "#fbbf24" : "#c4b5fd";
+                  return (
+                    <g key={region.id} onPointerDown={() => setActiveRegionId(region.id)}>
+                      <path
+                        d={bandPath(region)}
+                        fill={color}
+                        fillOpacity={selected ? 0.2 : 0.1}
+                        stroke={color}
+                        strokeWidth={selected ? 3 : 1.5}
+                        strokeDasharray={selected ? "none" : "8 6"}
+                        vectorEffect="non-scaling-stroke"
+                        className="cursor-move"
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          setActiveRegionId(region.id);
+                          setDraggedRegionHandle("move");
+                          regionDragPointRef.current = pointerToArtwork(event);
+                          event.currentTarget.setPointerCapture(event.pointerId);
+                        }}
+                      />
+                      <path
+                        d={centerPath(region)}
+                        fill="none"
+                        stroke={color}
+                        strokeOpacity="0.75"
+                        strokeWidth="1.5"
+                        strokeDasharray="5 5"
+                        vectorEffect="non-scaling-stroke"
+                        pointerEvents="none"
+                      />
+                      {selected && (["start", "control", "end"] as const).map((handle) => {
+                        const point = region.geometry[handle];
+                        return (
+                          <circle
+                            key={handle}
+                            cx={point[0]}
+                            cy={point[1]}
+                            r={Math.max(5, Math.min(img.w, img.h) * 0.009)}
+                            fill={handle === "control" ? color : "#0b0d10"}
+                            stroke={color}
+                            strokeWidth="3"
+                            vectorEffect="non-scaling-stroke"
+                            className="cursor-grab active:cursor-grabbing"
+                            onPointerDown={(event) => {
+                              event.stopPropagation();
+                              setDraggedRegionHandle(handle);
+                              event.currentTarget.setPointerCapture(event.pointerId);
+                            }}
+                          />
+                        );
+                      })}
+                    </g>
+                  );
+                })}
+              </svg>
+            )}
 
             {/* Rendered SVG Vector Output (After) with Clip Path for Slider */}
             {svgUrl && (

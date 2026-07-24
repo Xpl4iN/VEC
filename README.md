@@ -11,6 +11,11 @@ editable SVG. Processing runs locally in the browser through Pyodide.
 - Topology-aware palette cleanup that rejects fragmented antialias clusters while preserving contiguous shadow accents
 - Balanced, Illustrated, Maximum Detail, and Geometric logo presets
 - Per-layer Smooth, Faithful, and Geometric vectorization profiles
+- Movable treatment regions that start straight, support whole-band dragging, and bend into arches through start, center, and end handles
+- Whole-component regional assignment so letters, counters, and disconnected accents are never clipped at selection boundaries
+- Text, Illustration, Border / Geometric, and Custom regional fitting profiles
+- Geometric-to-Hand-drawn text character control with protected counters, disabled gap closing, and coordinated corner, smoothing, and curve-fit settings
+- Optional regional re-vectorization for pure-vector SVG sources while lossless passthrough remains the default
 - Advanced controls for smoothing, curve precision, corner detection, tiny-curve cleanup, and minimum detail area
 - Optional second and third refinement passes driven by the previous SVG, with source-mask gap closing and controlled edge refitting
 - Intuitive Straight, Curved, and Rounded edge-character choices for refinement passes, backed by line snapping, organic spline fitting, or circular-arc regularization
@@ -58,6 +63,13 @@ Build the production web application:
 cd apps/web
 npm ci
 npm run build
+```
+
+Run the treatment-region geometry and profile regressions:
+
+```bash
+cd apps/web
+npm run test:regions
 ```
 
 ## Vercel deployment
